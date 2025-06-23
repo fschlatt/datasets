@@ -13,21 +13,19 @@ import os
 import posixpath
 import re
 import shutil
-import sys
 import tarfile
 import time
 import xml.dom.minidom
 import zipfile
-from contextlib import contextmanager
+from collections.abc import Generator
 from io import BytesIO
 from itertools import chain
 from pathlib import Path, PurePosixPath
-from typing import Any, Dict, Generator, List, Optional, Tuple, TypeVar, Union
+from typing import Any, Optional, TypeVar, Union
 from unittest.mock import patch
 from urllib.parse import urlparse
 from xml.etree import ElementTree as ET
 
-import aiohttp.client_exceptions
 import fsspec
 import huggingface_hub
 import huggingface_hub.errors
@@ -46,30 +44,21 @@ from .extract import ExtractManager
 from .track import TrackedIterableFromGenerator
 
 
+try:
+    from aiohttp.client_exceptions import ClientError as _AiohttpClientError
+except ImportError:
+    # aiohttp is not available; synthesize an exception type
+    # that will never be raised by any actual code for use in the `except`
+    # clause only.
+    class _AiohttpClientError(Exception):
+        pass
+
+
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
 INCOMPLETE_SUFFIX = ".incomplete"
 
 T = TypeVar("T", str, Path)
-
-
-def init_hf_modules(hf_modules_cache: Optional[Union[Path, str]] = None) -> str:
-    """
-    Add hf_modules_cache to the python path.
-    By default hf_modules_cache='~/.cache/huggingface/modules'.
-    It can also be set with the environment variable HF_MODULES_CACHE.
-    This is used to add modules such as `datasets_modules`
-    """
-    hf_modules_cache = hf_modules_cache if hf_modules_cache is not None else config.HF_MODULES_CACHE
-    hf_modules_cache = str(hf_modules_cache)
-    if hf_modules_cache not in sys.path:
-        sys.path.append(hf_modules_cache)
-
-        os.makedirs(hf_modules_cache, exist_ok=True)
-        if not os.path.exists(os.path.join(hf_modules_cache, "__init__.py")):
-            with open(os.path.join(hf_modules_cache, "__init__.py"), "w"):
-                pass
-    return hf_modules_cache
 
 
 def is_remote_url(url_or_filename: str) -> bool:
@@ -282,14 +271,10 @@ def get_authentication_headers_for_url(url: str, token: Optional[Union[str, bool
         return {}
 
 
-class OfflineModeIsEnabled(ConnectionError):
-    pass
-
-
 def _raise_if_offline_mode_is_enabled(msg: Optional[str] = None):
     """Raise an OfflineModeIsEnabled error (subclass of ConnectionError) if HF_HUB_OFFLINE is True."""
     if config.HF_HUB_OFFLINE:
-        raise OfflineModeIsEnabled(
+        raise huggingface_hub.errors.OfflineModeIsEnabled(
             "Offline mode is enabled." if msg is None else "Offline mode is enabled. " + str(msg)
         )
 
@@ -402,23 +387,15 @@ def get_from_cache(
 
         incomplete_path = cache_path + ".incomplete"
 
-        @contextmanager
-        def temp_file_manager(mode="w+b"):
-            with open(incomplete_path, mode) as f:
-                yield f
-
         # Download to temporary file, then copy to cache path once finished.
         # Otherwise, you get corrupt cache entries if the download gets interrupted.
-        with temp_file_manager() as temp_file:
+        with open(incomplete_path, "w+b") as temp_file:
             logger.info(f"{url} not found in cache or force_download set to True, downloading to {temp_file.name}")
             # GET file object
             fsspec_get(url, temp_file, storage_options=storage_options, desc=download_desc, disable_tqdm=disable_tqdm)
 
         logger.info(f"storing {url} in cache at {cache_path}")
         shutil.move(temp_file.name, cache_path)
-        umask = os.umask(0o666)
-        os.umask(umask)
-        os.chmod(cache_path, 0o666 & ~umask)
 
         logger.info(f"creating metadata file for {cache_path}")
         meta = {"url": url, "etag": etag}
@@ -830,10 +807,10 @@ def _add_retries_to_file_obj_read_method(file_obj):
                 out = read(*args, **kwargs)
                 break
             except (
-                aiohttp.client_exceptions.ClientError,
+                _AiohttpClientError,
                 asyncio.TimeoutError,
-                requests.exceptions.ConnectTimeout,
                 requests.exceptions.ConnectionError,
+                requests.exceptions.Timeout,
             ) as err:
                 disconnect_err = err
                 logger.warning(
@@ -856,7 +833,7 @@ def _add_retries_to_file_obj_read_method(file_obj):
 
 def _prepare_path_and_storage_options(
     urlpath: str, download_config: Optional[DownloadConfig] = None
-) -> Tuple[str, Dict[str, Dict[str, Any]]]:
+) -> tuple[str, dict[str, dict[str, Any]]]:
     prepared_urlpath = []
     prepared_storage_options = {}
     for hop in urlpath.split("::"):
@@ -868,7 +845,7 @@ def _prepare_path_and_storage_options(
 
 def _prepare_single_hop_path_and_storage_options(
     urlpath: str, download_config: Optional[DownloadConfig] = None
-) -> Tuple[str, Dict[str, Dict[str, Any]]]:
+) -> tuple[str, dict[str, dict[str, Any]]]:
     """
     Prepare the URL and the kwargs that must be passed to the HttpFileSystem or HfFileSystem
 
@@ -969,7 +946,7 @@ def xopen(file: str, mode="r", *args, download_config: Optional[DownloadConfig] 
     return file_obj
 
 
-def xlistdir(path: str, download_config: Optional[DownloadConfig] = None) -> List[str]:
+def xlistdir(path: str, download_config: Optional[DownloadConfig] = None) -> list[str]:
     """Extend `os.listdir` function to support remote files.
 
     Args:
@@ -1159,7 +1136,7 @@ class xPath(type(Path())):
         """
         return xopen(str(self), *args, **kwargs)
 
-    def joinpath(self, *p: Tuple[str, ...]) -> "xPath":
+    def joinpath(self, *p: tuple[str, ...]) -> "xPath":
         """Extend :func:`xjoin` to support argument of type :obj:`~pathlib.Path`.
 
         Args:
@@ -1325,7 +1302,7 @@ class ArchiveIterable(TrackedIterableFromGenerator):
             yield file_path, file_obj
 
     @classmethod
-    def _iter_from_fileobj(cls, f) -> Generator[Tuple, None, None]:
+    def _iter_from_fileobj(cls, f) -> Generator[tuple, None, None]:
         compression = _get_extraction_protocol_with_magic_number(f)
         if compression == "zip":
             yield from cls._iter_zip(f)
@@ -1335,7 +1312,7 @@ class ArchiveIterable(TrackedIterableFromGenerator):
     @classmethod
     def _iter_from_urlpath(
         cls, urlpath: str, download_config: Optional[DownloadConfig] = None
-    ) -> Generator[Tuple, None, None]:
+    ) -> Generator[tuple, None, None]:
         compression = _get_extraction_protocol(urlpath, download_config=download_config)
         # Set block_size=0 to get faster streaming
         # (e.g. for hf:// and https:// it uses streaming Requests file-like instances)
@@ -1359,7 +1336,7 @@ class FilesIterable(TrackedIterableFromGenerator):
 
     @classmethod
     def _iter_from_urlpaths(
-        cls, urlpaths: Union[str, List[str]], download_config: Optional[DownloadConfig] = None
+        cls, urlpaths: Union[str, list[str]], download_config: Optional[DownloadConfig] = None
     ) -> Generator[str, None, None]:
         if not isinstance(urlpaths, list):
             urlpaths = [urlpaths]

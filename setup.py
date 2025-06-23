@@ -4,7 +4,6 @@
 Note:
 
    VERSION needs to be formatted following the MAJOR.MINOR.PATCH convention
-   (we need to follow this convention to be able to retrieve versioned scripts)
 
 Simple check list for release from AllenNLP repo: https://github.com/allenai/allennlp/blob/master/setup.py
 
@@ -62,9 +61,7 @@ Steps to make a release:
      ```
    Check that you can install it in a virtualenv/notebook by running:
      ```
-     pip install huggingface-hub fsspec aiohttp
-     pip install -U tqdm
-     pip install -i https://testpypi.python.org/pypi datasets
+     !pip install -U --index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ datasets
      ```
 
 6. Upload the final version to the actual PyPI:
@@ -121,19 +118,17 @@ REQUIRED_PKGS = [
     "pandas",
     # for downloading datasets over HTTPS
     "requests>=2.32.2",
-    # progress bars in download and scripts
+    # progress bars in downloads and data operations
     "tqdm>=4.66.3",
     # for fast hashing
     "xxhash",
     # for better multiprocessing
-    "multiprocess",
+    "multiprocess<0.70.17",  # to align with dill<0.3.9 (see above)
     # to save datasets locally or on any filesystem
     # minimum 2023.1.0 to support protocol=kwargs in fsspec's `open`, `get_fs_token_paths`, etc.: see https://github.com/fsspec/filesystem_spec/pull/1143
-    "fsspec[http]>=2023.1.0,<=2024.6.1",
-    # for data streaming via http
-    "aiohttp",
+    "fsspec[http]>=2023.1.0,<=2025.3.0",
     # To get datasets from the Datasets Hub on huggingface.co
-    "huggingface-hub>=0.22.0",
+    "huggingface-hub>=0.24.0",
     # Utilities from PyPA to e.g., compare versions
     "packaging",
     # To parse YAML metadata from dataset cards
@@ -142,8 +137,7 @@ REQUIRED_PKGS = [
 
 AUDIO_REQUIRE = [
     "soundfile>=0.12.1",
-    "librosa",
-    "soxr>=0.4.0; python_version>='3.9'",  # Supports numpy-2
+    "torchcodec>=0.4.0",
 ]
 
 VISION_REQUIRE = [
@@ -157,6 +151,8 @@ BENCHMARKS_REQUIRE = [
 ]
 
 TESTS_REQUIRE = [
+    # fix pip install issues for windows
+    "numba>=0.56.4",  # to get recent versions of llvmlite for windows ci
     # test dependencies
     "absl-py",
     "decorator",
@@ -166,7 +162,8 @@ TESTS_REQUIRE = [
     "pytest-datadir",
     "pytest-xdist",
     # optional dependencies
-    "elasticsearch<8.0.0",  # 8.0 asks users to provide hosts or cloud_id when instantiating ElasticSearch()
+    "aiohttp",
+    "elasticsearch>=7.17.12,<8.0.0",  # 8.0 asks users to provide hosts or cloud_id when instantiating ElasticSearch(); 7.9.1 has legacy numpy.float_ which was fixed in https://github.com/elastic/elasticsearch-py/pull/2551.
     "faiss-cpu>=1.8.0.post1",  # Pins numpy < 2
     "jax>=0.3.14; sys_platform != 'win32'",
     "jaxlib>=0.3.14; sys_platform != 'win32'",
@@ -176,25 +173,23 @@ TESTS_REQUIRE = [
     "py7zr",
     "rarfile>=4.0",
     "sqlalchemy",
-    "s3fs>=2021.11.1",  # aligned with fsspec[http]>=2021.11.1; test only on python 3.7 for now
     "protobuf<4.0.0",  # 4.0.0 breaks compatibility with tensorflow<2.12
-    "tensorflow>=2.6.0; python_version<'3.10'",  # numpy-2 is not supported for Python < 3.10
-    "tensorflow>=2.16.0; python_version>='3.10'",  # Pins numpy < 2
+    "tensorflow>=2.6.0; python_version<'3.10' and sys_platform != 'win32'",  # numpy-2 is not supported for Python < 3.10
+    "tensorflow>=2.16.0; python_version>='3.10' and sys_platform != 'win32'",  # Pins numpy < 2
     "tiktoken",
     "torch>=2.0.0",
+    "torchdata",
     "soundfile>=0.12.1",
     "transformers>=4.42.0",  # Pins numpy < 2
     "zstandard",
     "polars[timezone]>=0.20.0",
+    "Pillow>=9.4.0",  # When PIL.Image.ExifTags was introduced
+    "soundfile>=0.12.1",
+    "torchcodec>=0.4.0; sys_platform != 'win32'",  # not available for windows
 ]
-
-
-TESTS_REQUIRE.extend(VISION_REQUIRE)
-TESTS_REQUIRE.extend(AUDIO_REQUIRE)
 
 NUMPY2_INCOMPATIBLE_LIBRARIES = [
     "faiss-cpu",
-    "librosa",  # librosa -> numba-0.60.0 requires numpy < 2.1 (see GH-7111)
     "tensorflow",
 ]
 TESTS_NUMPY2_REQUIRE = [
@@ -204,13 +199,13 @@ TESTS_NUMPY2_REQUIRE = [
 QUALITY_REQUIRE = ["ruff>=0.3.0"]
 
 DOCS_REQUIRE = [
-    # Might need to add doc-builder and some specific deps in the future
-    "s3fs",
     # Following dependencies are required for the Python reference to be built properly
     "transformers",
     "torch",
     "tensorflow>=2.6.0",
 ]
+
+PDFS_REQUIRE = ["pdfplumber>=0.11.4"]
 
 EXTRAS_REQUIRE = {
     "audio": AUDIO_REQUIRE,
@@ -221,7 +216,6 @@ EXTRAS_REQUIRE = {
     "tensorflow_gpu": ["tensorflow>=2.6.0"],
     "torch": ["torch"],
     "jax": ["jax>=0.3.14", "jaxlib>=0.3.14"],
-    "s3": ["s3fs"],
     "streaming": [],  # for backward compatibility
     "dev": TESTS_REQUIRE + QUALITY_REQUIRE + DOCS_REQUIRE,
     "tests": TESTS_REQUIRE,
@@ -229,11 +223,12 @@ EXTRAS_REQUIRE = {
     "quality": QUALITY_REQUIRE,
     "benchmarks": BENCHMARKS_REQUIRE,
     "docs": DOCS_REQUIRE,
+    "pdfs": PDFS_REQUIRE,
 }
 
 setup(
     name="datasets",
-    version="2.21.1.dev0",  # expected format is one of x.y.z.dev0, or x.y.z.rc1 or x.y.z (no to dashes, yes to dots)
+    version="4.0.0.dev0",  # expected format is one of x.y.z.dev0, or x.y.z.rc1 or x.y.z (no to dashes, yes to dots)
     description="HuggingFace community-driven open-source library of datasets",
     long_description=open("README.md", encoding="utf-8").read(),
     long_description_content_type="text/markdown",
@@ -249,7 +244,7 @@ setup(
         "datasets.utils.resources": ["*.json", "*.yaml", "*.tsv"],
     },
     entry_points={"console_scripts": ["datasets-cli=datasets.commands.datasets_cli:main"]},
-    python_requires=">=3.8.0",
+    python_requires=">=3.9.0",
     install_requires=REQUIRED_PKGS,
     extras_require=EXTRAS_REQUIRE,
     classifiers=[
@@ -260,9 +255,9 @@ setup(
         "License :: OSI Approved :: Apache Software License",
         "Operating System :: OS Independent",
         "Programming Language :: Python :: 3",
-        "Programming Language :: Python :: 3.8",
         "Programming Language :: Python :: 3.9",
         "Programming Language :: Python :: 3.10",
+        "Programming Language :: Python :: 3.11",
         "Topic :: Scientific/Engineering :: Artificial Intelligence",
     ],
     keywords="datasets machine learning datasets",

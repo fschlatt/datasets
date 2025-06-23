@@ -9,7 +9,7 @@ Dataset repositories offer features such as:
 - Commit history and diffs
 - Metadata for discoverability
 - Dataset cards for documentation, licensing, limitations, etc.
-- [Dataset Viewer](../hub/datasets-viewer)
+- [Dataset Viewer](https://huggingface.co/docs/hub/datasets-viewer)
 
 This guide will show you how to share a dataset folder or repository that can be easily accessed by anyone.
 
@@ -25,11 +25,7 @@ The following formats are supported: CSV, TSV, JSON, JSON lines, text, Parquet, 
 Many kinds of compressed file types are also supported: GZ, BZ2, LZ4, LZMA or ZSTD.
 For example, your dataset can be made of `.json.gz` files.
 
-On the other hand, if your dataset is not in a supported format or if you want more control over how your dataset is loaded, you can write your own dataset script.
-Note that some feature are not available for datasets defined using a loading scripts, such as the Dataset Viewer. Users also have to pass `trust_remote_code=True` to load the dataset. It is generally recommended for datasets to not rely on a loading script if possible, to benefit from all the Hub's features.
-
 When loading a dataset from the Hub, all the files in the supported formats are loaded, following the [repository structure](./repository_structure).
-However if there's a dataset script, it is downloaded and executed to download and prepare the dataset instead.
 
 For more information on how to load a dataset from the Hub, take a look at the [load a dataset from the Hub](./load_hub) tutorial.
 
@@ -64,17 +60,16 @@ Check your directory to ensure the only files you're uploading are:
 
 - The dataset card `README.md`
 
-- (optional) `your_dataset_name.py` is your dataset loading script (optional if your data files are already in the supported formats csv/jsonl/json/parquet/txt). To create a dataset script, see the [dataset script](dataset_script) page. Note that some feature are not available for datasets defined using a loading scripts, such as the Dataset Viewer. Users also have to pass `trust_remote_code=True` to load the dataset. It is generally recommended for datasets to not rely on a loading script if possible, to benefit from all the Hub's features.
 
 ## huggingface-cli upload
 
-Use the `huggingface-cli upload` command to upload files to the Hub directly. Internally, it uses the same [`upload_file`] and [`upload_folder`] helpers described in the [Upload guide](../huggingface_hub/guides/upload). In the examples below, we will walk through the most common use cases. For a full list of available options, you can run:
+Use the `huggingface-cli upload` command to upload files to the Hub directly. Internally, it uses the same [`upload_file`] and [`upload_folder`] helpers described in the [Upload guide](https://huggingface.co/docs/huggingface_hub/guides/upload). In the examples below, we will walk through the most common use cases. For a full list of available options, you can run:
 
 ```bash
 >>> huggingface-cli upload --help
 ```
 
-For more general information about `huggingface-cli` you can check the [CLI guide](../huggingface_hub/guides/cli).
+For more general information about `huggingface-cli` you can check the [CLI guide](https://huggingface.co/docs/huggingface_hub/guides/cli).
 
 ### Upload an entire folder
 
@@ -214,6 +209,6 @@ Congratulations, your dataset has now been uploaded to the Hugging Face Hub wher
 dataset = load_dataset("Wauplin/my-cool-dataset")
 ```
 
-If your dataset is supported, it should also have a [Dataset Viewer](../hub/datasets-viewer) for everyone to explore the dataset content.
+If your dataset is supported, it should also have a [Dataset Viewer](https://huggingface.co/docs/hub/datasets-viewer) for everyone to explore the dataset content.
 
 Finally, don't forget to enrich the dataset card to document your dataset and make it discoverable! Check out the [Create a dataset card](dataset_card) guide to learn more.

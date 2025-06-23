@@ -3,12 +3,13 @@ import textwrap
 from collections import Counter
 from itertools import groupby
 from operator import itemgetter
-from typing import Any, ClassVar, Dict, List, Optional, Tuple
+from typing import Any, ClassVar, Optional
 
 import yaml
 from huggingface_hub import DatasetCardData
 
 from ..config import METADATA_CONFIGS_FIELD
+from ..features import Features
 from ..info import DatasetInfo, DatasetInfosDict
 from ..naming import _split_re
 from ..utils.logging import get_logger
@@ -32,7 +33,7 @@ class _NoDuplicateSafeLoader(yaml.SafeLoader):
         return mapping
 
 
-def _split_yaml_from_readme(readme_content: str) -> Tuple[Optional[str], str]:
+def _split_yaml_from_readme(readme_content: str) -> tuple[Optional[str], str]:
     full_content = list(readme_content.splitlines())
     if full_content and full_content[0] == "---" and "---" in full_content[1:]:
         sep_idx = full_content[1:].index("---") + 1
@@ -42,7 +43,7 @@ def _split_yaml_from_readme(readme_content: str) -> Tuple[Optional[str], str]:
     return None, "\n".join(full_content)
 
 
-class MetadataConfigs(Dict[str, Dict[str, Any]]):
+class MetadataConfigs(dict[str, dict[str, Any]]):
     """Should be in format {config_name: {**config_params}}."""
 
     FIELD_NAME: ClassVar[str] = METADATA_CONFIGS_FIELD
@@ -101,8 +102,8 @@ class MetadataConfigs(Dict[str, Dict[str, Any]]):
     @classmethod
     def _from_exported_parquet_files_and_dataset_infos(
         cls,
-        revision: str,
-        exported_parquet_files: List[Dict[str, Any]],
+        parquet_commit_hash: str,
+        exported_parquet_files: list[dict[str, Any]],
         dataset_infos: DatasetInfosDict,
     ) -> "MetadataConfigs":
         metadata_configs = {
@@ -111,7 +112,7 @@ class MetadataConfigs(Dict[str, Dict[str, Any]]):
                     {
                         "split": split_name,
                         "path": [
-                            parquet_file["url"].replace("refs%2Fconvert%2Fparquet", revision)
+                            parquet_file["url"].replace("refs%2Fconvert%2Fparquet", parquet_commit_hash)
                             for parquet_file in parquet_files_for_split
                         ],
                     }
@@ -152,8 +153,12 @@ class MetadataConfigs(Dict[str, Dict[str, Any]]):
                 cls._raise_if_data_files_field_not_valid(metadata_config)
             return cls(
                 {
-                    config["config_name"]: {param: value for param, value in config.items() if param != "config_name"}
-                    for config in metadata_configs
+                    config.pop("config_name"): {
+                        param: value if param != "features" else Features._from_yaml_list(value)
+                        for param, value in config.items()
+                    }
+                    for metadata_config in metadata_configs
+                    if (config := metadata_config.copy())
                 }
             )
         return cls()

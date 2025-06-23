@@ -1,3 +1,4 @@
+import asyncio
 import contextlib
 import copy
 import itertools
@@ -7,6 +8,7 @@ import pickle
 import re
 import sys
 import tempfile
+import time
 from functools import partial
 from pathlib import Path
 from unittest import TestCase
@@ -125,7 +127,13 @@ class BaseDatasetTest(TestCase):
         self._caplog = caplog
 
     def _create_dummy_dataset(
-        self, in_memory: bool, tmp_dir: str, multiple_columns=False, array_features=False, nested_features=False
+        self,
+        in_memory: bool,
+        tmp_dir: str,
+        multiple_columns=False,
+        array_features=False,
+        nested_features=False,
+        int_to_float=False,
     ) -> Dataset:
         assert int(multiple_columns) + int(array_features) + int(nested_features) < 2
         if multiple_columns:
@@ -149,6 +157,12 @@ class BaseDatasetTest(TestCase):
             data = {"nested": [{"a": i, "x": i * 10, "c": i * 100} for i in range(1, 11)]}
             features = Features({"nested": {"a": Value("int64"), "x": Value("int64"), "c": Value("int64")}})
             dset = Dataset.from_dict(data, features=features)
+        elif int_to_float:
+            data = {
+                "text": ["text1", "text2", "text3", "text4"],
+                "labels": [[1, 1, 1, 0, 0], [0, 0, 0, 1, 0], [0, 0, 0, 1, 1], [0, 0, 0, 1, 0]],
+            }
+            dset = Dataset.from_dict(data)
         else:
             dset = Dataset.from_dict({"filename": ["my_name-train" + "_" + str(x) for x in np.arange(30).tolist()]})
         if not in_memory:
@@ -385,9 +399,9 @@ class BaseDatasetTest(TestCase):
                 self.assertEqual(len(dset[0]), 1)
                 self.assertIsInstance(dset[0]["col_1"], np.int64)
                 self.assertEqual(dset[0]["col_1"].item(), 3)
-                self.assertIsInstance(dset["col_1"], np.ndarray)
-                self.assertListEqual(list(dset["col_1"].shape), [4])
-                np.testing.assert_array_equal(dset["col_1"], np.array([3, 2, 1, 0]))
+                self.assertIsInstance(dset["col_1"][:], np.ndarray)
+                self.assertListEqual(list(dset["col_1"][:].shape), [4])
+                np.testing.assert_array_equal(dset["col_1"][:], np.array([3, 2, 1, 0]))
                 self.assertNotEqual(dset._fingerprint, fingerprint)
 
                 dset.reset_format()
@@ -395,8 +409,8 @@ class BaseDatasetTest(TestCase):
                     self.assertEqual(len(dset[0]), 1)
                     self.assertIsInstance(dset[0]["col_1"], np.int64)
                     self.assertEqual(dset[0]["col_1"].item(), 3)
-                    self.assertIsInstance(dset["col_1"], np.ndarray)
-                    self.assertListEqual(list(dset["col_1"].shape), [4])
+                    self.assertIsInstance(dset["col_1"][:], np.ndarray)
+                    self.assertListEqual(list(dset["col_1"][:].shape), [4])
                     np.testing.assert_array_equal(dset["col_1"], np.array([3, 2, 1, 0]))
 
                 self.assertEqual(dset.format["type"], None)
@@ -424,7 +438,7 @@ class BaseDatasetTest(TestCase):
                 dset.set_format(type="torch", columns=["col_1"])
                 self.assertEqual(len(dset[0]), 1)
                 self.assertIsInstance(dset[0]["col_1"], torch.Tensor)
-                self.assertIsInstance(dset["col_1"], torch.Tensor)
+                self.assertIsInstance(dset["col_1"][:], torch.Tensor)
                 self.assertListEqual(list(dset[0]["col_1"].shape), [])
                 self.assertEqual(dset[0]["col_1"].item(), 3)
 
@@ -436,13 +450,13 @@ class BaseDatasetTest(TestCase):
                 dset.set_format(type="torch")
                 self.assertEqual(len(dset[0]), 3)
                 self.assertIsInstance(dset[0]["col_1"], torch.Tensor)
-                self.assertIsInstance(dset["col_1"], torch.Tensor)
+                self.assertIsInstance(dset["col_1"][:], torch.Tensor)
                 self.assertListEqual(list(dset[0]["col_1"].shape), [])
                 self.assertEqual(dset[0]["col_1"].item(), 3)
                 self.assertIsInstance(dset[0]["col_2"], str)
                 self.assertEqual(dset[0]["col_2"], "a")
                 self.assertIsInstance(dset[0]["col_3"], torch.Tensor)
-                self.assertIsInstance(dset["col_3"], torch.Tensor)
+                self.assertIsInstance(dset["col_3"][:], torch.Tensor)
                 self.assertListEqual(list(dset[0]["col_3"].shape), [])
 
     @require_tf
@@ -557,7 +571,7 @@ class BaseDatasetTest(TestCase):
                 with dset.class_encode_column("col_1") as casted_dset:
                     self.assertIsInstance(casted_dset.features["col_1"], ClassLabel)
                     self.assertListEqual(casted_dset.features["col_1"].names, ["0", "1", "2", "3"])
-                    self.assertListEqual(casted_dset["col_1"], [3, 2, 1, 0])
+                    self.assertListEqual(casted_dset["col_1"][:], [3, 2, 1, 0])
                     self.assertNotEqual(casted_dset._fingerprint, dset._fingerprint)
                     self.assertNotEqual(casted_dset, dset)
                     assert_arrow_metadata_are_synced_with_dataset_features(casted_dset)
@@ -565,7 +579,7 @@ class BaseDatasetTest(TestCase):
                 with dset.class_encode_column("col_2") as casted_dset:
                     self.assertIsInstance(casted_dset.features["col_2"], ClassLabel)
                     self.assertListEqual(casted_dset.features["col_2"].names, ["a", "b", "c", "d"])
-                    self.assertListEqual(casted_dset["col_2"], [0, 1, 2, 3])
+                    self.assertListEqual(casted_dset["col_2"][:], [0, 1, 2, 3])
                     self.assertNotEqual(casted_dset._fingerprint, dset._fingerprint)
                     self.assertNotEqual(casted_dset, dset)
                     assert_arrow_metadata_are_synced_with_dataset_features(casted_dset)
@@ -573,7 +587,7 @@ class BaseDatasetTest(TestCase):
                 with dset.class_encode_column("col_3") as casted_dset:
                     self.assertIsInstance(casted_dset.features["col_3"], ClassLabel)
                     self.assertListEqual(casted_dset.features["col_3"].names, ["False", "True"])
-                    self.assertListEqual(casted_dset["col_3"], [0, 1, 0, 1])
+                    self.assertListEqual(casted_dset["col_3"][:], [0, 1, 0, 1])
                     self.assertNotEqual(casted_dset._fingerprint, dset._fingerprint)
                     self.assertNotEqual(casted_dset, dset)
                     assert_arrow_metadata_are_synced_with_dataset_features(casted_dset)
@@ -704,7 +718,7 @@ class BaseDatasetTest(TestCase):
             with concatenate_datasets([dset1, dset2, dset3]) as dset_concat:
                 self.assertTupleEqual((len(dset1), len(dset2), len(dset3)), (3, 3, 2))
                 self.assertEqual(len(dset_concat), len(dset1) + len(dset2) + len(dset3))
-                self.assertListEqual(dset_concat["id"], [0, 1, 2, 3, 4, 5, 6, 7])
+                self.assertListEqual(dset_concat["id"][:], [0, 1, 2, 3, 4, 5, 6, 7])
                 self.assertEqual(len(dset_concat.cache_files), 0 if in_memory else 3)
                 self.assertEqual(dset_concat.info.description, "Dataset1\n\nDataset2")
             del dset1, dset2, dset3
@@ -746,7 +760,7 @@ class BaseDatasetTest(TestCase):
             with concatenate_datasets([dset3, dset2, dset1]) as dset_concat:
                 self.assertTupleEqual((len(dset1), len(dset2), len(dset3)), (3, 3, 3))
                 self.assertEqual(len(dset_concat), len(dset1) + len(dset2) + len(dset3))
-                self.assertListEqual(dset_concat["id"], [6, 7, 8, 5, 4, 3, 2, 1, 0])
+                self.assertListEqual(dset_concat["id"][:], [6, 7, 8, 5, 4, 3, 2, 1, 0])
                 # in_memory = False:
                 # 3 cache files for the dset_concat._data table
                 # no cache file for the indices because it's in memory
@@ -761,9 +775,9 @@ class BaseDatasetTest(TestCase):
             with concatenate_datasets([dset1, dset2, dset3], axis=1) as dset_concat:
                 self.assertTupleEqual((len(dset1), len(dset2), len(dset3)), (3, 3, 3))
                 self.assertEqual(len(dset_concat), len(dset1))
-                self.assertListEqual(dset_concat["id1"], [2, 1, 0])
-                self.assertListEqual(dset_concat["id2"], [5, 4, 3])
-                self.assertListEqual(dset_concat["id3"], [6, 7, 8])
+                self.assertListEqual(dset_concat["id1"][:], [2, 1, 0])
+                self.assertListEqual(dset_concat["id2"][:], [5, 4, 3])
+                self.assertListEqual(dset_concat["id3"][:], [6, 7, 8])
                 # in_memory = False:
                 # 3 cache files for the dset_concat._data table
                 # no cache file for the indices because it's None
@@ -775,7 +789,7 @@ class BaseDatasetTest(TestCase):
 
             with concatenate_datasets([dset1], axis=1) as dset_concat:
                 self.assertEqual(len(dset_concat), len(dset1))
-                self.assertListEqual(dset_concat["id1"], [2, 1, 0])
+                self.assertListEqual(dset_concat["id1"][:], [2, 1, 0])
                 # in_memory = False:
                 # 1 cache file for the dset_concat._data table
                 # no cache file for the indices because it's in memory
@@ -806,7 +820,7 @@ class BaseDatasetTest(TestCase):
             with concatenate_datasets([dset3, dset2, dset1]) as dset_concat:
                 self.assertTupleEqual((len(dset1), len(dset2), len(dset3)), (3, 3, 2))
                 self.assertEqual(len(dset_concat), len(dset1) + len(dset2) + len(dset3))
-                self.assertListEqual(dset_concat["id"], [7, 6, 5, 4, 3, 2, 1, 0])
+                self.assertListEqual(dset_concat["id"][:], [7, 6, 5, 4, 3, 2, 1, 0])
                 # in_memory = False:
                 # 3 cache files for the dset_concat._data table, and 1 for the dset_concat._indices_table
                 # There is only 1 for the indices tables (i1.arrow)
@@ -862,12 +876,38 @@ class BaseDatasetTest(TestCase):
                 with pickle.loads(pickle.dumps(dset_concat)) as dset_concat:
                     self.assertTupleEqual((len(dset1), len(dset2), len(dset3)), (3, 3, 2))
                     self.assertEqual(len(dset_concat), len(dset1) + len(dset2) + len(dset3))
-                    self.assertListEqual(dset_concat["id"], [7, 6, 5, 4, 3, 2, 1, 0])
+                    self.assertListEqual(dset_concat["id"][:], [7, 6, 5, 4, 3, 2, 1, 0])
                     # in_memory = True: 1 cache file for dset3
                     # in_memory = False: 2 caches files for dset1 and dset2, and 1 cache file for i1.arrow
                     self.assertEqual(len(dset_concat.cache_files), 1 if in_memory else 2 + 1)
                     self.assertEqual(dset_concat.info.description, "Dataset2\n\nDataset1")
             del dset1, dset2, dset3
+
+    def test_repeat(self, in_memory):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with self._create_dummy_dataset(in_memory, tmp_dir, multiple_columns=True) as dset:
+                repeated_dset = dset.repeat(3)
+                column_values_dict = {col: dset[col] for col in dset.column_names}
+                for col, single_values in column_values_dict.items():
+                    self.assertListEqual(repeated_dset[col][:], single_values[:] * 3)
+                del repeated_dset
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with self._create_dummy_dataset(in_memory, tmp_dir, multiple_columns=True) as dset:
+                with pytest.raises(ValueError):
+                    dset.repeat(None)
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with self._create_dummy_dataset(in_memory, tmp_dir, multiple_columns=True) as dset:
+                repeated_dset = dset.repeat(0)
+                self.assertEqual(len(repeated_dset), 0)
+                del repeated_dset
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with self._create_dummy_dataset(in_memory, tmp_dir, multiple_columns=True) as dset:
+                repeated_dset = dset.repeat(-1)
+                self.assertEqual(len(repeated_dset), 0)
+                del repeated_dset
 
     def test_flatten(self, in_memory):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -1020,7 +1060,7 @@ class BaseDatasetTest(TestCase):
                         dset_test.features,
                         Features({"filename": Value("string"), "name": Value("string"), "id": Value("int64")}),
                     )
-                    self.assertListEqual(dset_test["id"], list(range(30)))
+                    self.assertListEqual(dset_test["id"][:], list(range(30)))
                     self.assertNotEqual(dset_test._fingerprint, fingerprint)
                     assert_arrow_metadata_are_synced_with_dataset_features(dset_test)
 
@@ -1045,7 +1085,7 @@ class BaseDatasetTest(TestCase):
                         dset_test_with_indices.features,
                         Features({"filename": Value("string"), "name": Value("string"), "id": Value("int64")}),
                     )
-                    self.assertListEqual(dset_test_with_indices["id"], list(range(30)))
+                    self.assertListEqual(dset_test_with_indices["id"][:], list(range(30)))
                     assert_arrow_metadata_are_synced_with_dataset_features(dset_test_with_indices)
 
         # interrupted
@@ -1080,7 +1120,7 @@ class BaseDatasetTest(TestCase):
                         dset_test_with_indices.features,
                         Features({"filename": Value("string"), "name": Value("string"), "id": Value("int64")}),
                     )
-                    self.assertListEqual(dset_test_with_indices["id"], list(range(30)))
+                    self.assertListEqual(dset_test_with_indices["id"][:], list(range(30)))
                     assert_arrow_metadata_are_synced_with_dataset_features(dset_test_with_indices)
 
         # formatted
@@ -1090,11 +1130,32 @@ class BaseDatasetTest(TestCase):
                 with dset.map(lambda x: {"col_1_plus_one": x["col_1"] + 1}) as dset_test:
                     self.assertEqual(len(dset_test), 4)
                     self.assertEqual(dset_test.format["type"], "numpy")
-                    self.assertIsInstance(dset_test["col_1"], np.ndarray)
-                    self.assertIsInstance(dset_test["col_1_plus_one"], np.ndarray)
+                    self.assertIsInstance(dset_test["col_1"][:], np.ndarray)
+                    self.assertIsInstance(dset_test["col_1_plus_one"][:], np.ndarray)
                     self.assertListEqual(sorted(dset_test[0].keys()), ["col_1", "col_1_plus_one"])
                     self.assertListEqual(sorted(dset_test.column_names), ["col_1", "col_1_plus_one", "col_2", "col_3"])
                     assert_arrow_metadata_are_synced_with_dataset_features(dset_test)
+        # casting int labels to float labels
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with self._create_dummy_dataset(in_memory, tmp_dir, int_to_float=True) as dset:
+
+                def _preprocess(examples):
+                    result = {"labels": [list(map(float, labels)) for labels in examples["labels"]]}
+                    return result
+
+                with dset.map(
+                    _preprocess, remove_columns=["labels", "text"], batched=True, try_original_type=True
+                ) as dset_test:
+                    for labels in dset_test["labels"]:
+                        for label in labels:
+                            self.assertIsInstance(label, int)
+
+                with dset.map(
+                    _preprocess, remove_columns=["labels", "text"], batched=True, try_original_type=False
+                ) as dset_test:
+                    for labels in dset_test["labels"]:
+                        for label in labels:
+                            self.assertIsInstance(label, float)
 
     def test_map_multiprocessing(self, in_memory):
         with tempfile.TemporaryDirectory() as tmp_dir:  # standard
@@ -1111,7 +1172,7 @@ class BaseDatasetTest(TestCase):
                     self.assertEqual(len(dset_test.cache_files), 0 if in_memory else 2)
                     if not in_memory:
                         self.assertIn("_of_00002.arrow", dset_test.cache_files[0]["filename"])
-                    self.assertListEqual(dset_test["id"], list(range(30)))
+                    self.assertListEqual(dset_test["id"][:], list(range(30)))
                     self.assertNotEqual(dset_test._fingerprint, fingerprint)
                     assert_arrow_metadata_are_synced_with_dataset_features(dset_test)
 
@@ -1127,7 +1188,7 @@ class BaseDatasetTest(TestCase):
                         Features({"filename": Value("string"), "id": Value("int64")}),
                     )
                     self.assertEqual(len(dset_test.cache_files), 0 if in_memory else 2)
-                    self.assertListEqual(dset_test["id"], list(range(2)))
+                    self.assertListEqual(dset_test["id"][:], list(range(2)))
                     self.assertNotEqual(dset_test._fingerprint, fingerprint)
                     assert_arrow_metadata_are_synced_with_dataset_features(dset_test)
 
@@ -1142,7 +1203,7 @@ class BaseDatasetTest(TestCase):
                         Features({"filename": Value("string"), "id": Value("int64")}),
                     )
                     self.assertEqual(len(dset_test.cache_files), 0 if in_memory else 3)
-                    self.assertListEqual(dset_test["id"], list(range(30)))
+                    self.assertListEqual(dset_test["id"][:], list(range(30)))
                     self.assertNotEqual(dset_test._fingerprint, fingerprint)
                     assert_arrow_metadata_are_synced_with_dataset_features(dset_test)
 
@@ -1157,7 +1218,7 @@ class BaseDatasetTest(TestCase):
                         Features({"filename": Value("string"), "rank": Value("int64")}),
                     )
                     self.assertEqual(len(dset_test.cache_files), 0 if in_memory else 3)
-                    self.assertListEqual(dset_test["rank"], [0] * 10 + [1] * 10 + [2] * 10)
+                    self.assertListEqual(dset_test["rank"][:], [0] * 10 + [1] * 10 + [2] * 10)
                     self.assertNotEqual(dset_test._fingerprint, fingerprint)
                     assert_arrow_metadata_are_synced_with_dataset_features(dset_test)
 
@@ -1174,8 +1235,8 @@ class BaseDatasetTest(TestCase):
                         Features({"filename": Value("string"), "id": Value("int64"), "rank": Value("int64")}),
                     )
                     self.assertEqual(len(dset_test.cache_files), 0 if in_memory else 3)
-                    self.assertListEqual(dset_test["id"], list(range(30)))
-                    self.assertListEqual(dset_test["rank"], [0] * 10 + [1] * 10 + [2] * 10)
+                    self.assertListEqual(dset_test["id"][:], list(range(30)))
+                    self.assertListEqual(dset_test["rank"][:], [0] * 10 + [1] * 10 + [2] * 10)
                     self.assertNotEqual(dset_test._fingerprint, fingerprint)
                     assert_arrow_metadata_are_synced_with_dataset_features(dset_test)
 
@@ -1195,7 +1256,7 @@ class BaseDatasetTest(TestCase):
                         Features({"filename": Value("string"), "id": Value("int64")}),
                     )
                     self.assertEqual(len(dset_test.cache_files), 0 if in_memory else 2)
-                    self.assertListEqual(dset_test["id"], list(range(30)))
+                    self.assertListEqual(dset_test["id"][:], list(range(30)))
                     self.assertNotEqual(dset_test._fingerprint, fingerprint)
                     self.assertEqual(dset_test._fingerprint, new_fingerprint)
                     assert_arrow_metadata_are_synced_with_dataset_features(dset_test)
@@ -1214,7 +1275,7 @@ class BaseDatasetTest(TestCase):
                         Features({"filename": Value("string"), "id": Value("int64")}),
                     )
                     self.assertEqual(len(dset_test.cache_files), 0 if in_memory else 2)
-                    self.assertListEqual(dset_test["id"], list(range(30)))
+                    self.assertListEqual(dset_test["id"][:], list(range(30)))
                     self.assertNotEqual(dset_test._fingerprint, fingerprint)
                     assert_arrow_metadata_are_synced_with_dataset_features(dset_test)
 
@@ -1430,6 +1491,91 @@ class BaseDatasetTest(TestCase):
                                     )
             finally:
                 datasets.enable_caching()
+
+    def test_suffix_template_format(self, in_memory):
+        with (
+            tempfile.TemporaryDirectory() as tmp_dir,
+            self._caplog.at_level(INFO, logger=get_logger().name),
+            self._create_dummy_dataset(in_memory, tmp_dir) as dset,
+            self.assertRaises(ValueError) as e,
+            dset.map(lambda x: {"foo": "bar"}, suffix_template="_{}_of_{}"),
+        ):
+            self.assertIn(
+                "suffix_template must contain exactly the fields 'rank' and 'num_proc', got: ",
+                e.exception.args[0],
+            )
+
+    def test_cache_file_name_no_ext_raises_error(self, in_memory):
+        with (
+            tempfile.TemporaryDirectory() as tmp_dir,
+            self._caplog.at_level(INFO, logger=get_logger().name),
+            self._create_dummy_dataset(in_memory, tmp_dir) as dset,
+            self.assertRaises(ValueError) as e,
+            dset.map(lambda x: {"foo": "bar"}, cache_file_name=os.path.join(tmp_dir, "train")),
+        ):
+            self.assertIn("Expected cache_file_name to have an extension, but got: ", e.exception.args[0])
+
+    def test_map_caching_reuses_cache_with_different_num_proc(self, in_memory):
+        for dset_test1_num_proc, dset_test2_num_proc in [(1, 2), (2, 1)]:
+            with (
+                tempfile.TemporaryDirectory() as tmp_dir,
+                self._caplog.at_level(INFO, logger=get_logger().name),
+                self._create_dummy_dataset(in_memory, tmp_dir) as dset,
+            ):
+                # cannot mock _map_single here because mock objects aren't picklable
+                # see: https://github.com/python/cpython/issues/100090
+                self._caplog.clear()
+                with dset.map(lambda x: {"foo": "bar"}, num_proc=dset_test1_num_proc) as dset_test1:
+                    dset_test1_data_files = list(dset_test1.cache_files)
+                    self.assertFalse("Loading cached processed dataset" in self._caplog.text)
+
+                self._caplog.clear()
+                with dset.map(lambda x: {"foo": "bar"}, num_proc=dset_test2_num_proc) as dset_test2:
+                    self.assertEqual(dset_test1_data_files, dset_test2.cache_files)
+                    self.assertEqual(len(dset_test2.cache_files), 0 if in_memory else dset_test1_num_proc)
+                    self.assertTrue(("Loading cached processed dataset" in self._caplog.text) ^ in_memory)
+
+    def test_map_caching_partial_remap(self, in_memory):
+        with (
+            tempfile.TemporaryDirectory() as tmp_dir,
+            self._caplog.at_level(INFO, logger=get_logger().name),
+            self._create_dummy_dataset(in_memory, tmp_dir) as dset,
+        ):
+            # cannot mock _map_single here because mock objects aren't picklable
+            # see: https://github.com/python/cpython/issues/100090
+            self._caplog.clear()
+            dset_test1_num_proc = 4
+            with dset.map(lambda x: {"foo": "bar"}, num_proc=dset_test1_num_proc) as dset_test1:
+                dset_test1_data_files = list(dset_test1.cache_files)
+                self.assertFalse("Loading cached processed dataset" in self._caplog.text)
+
+            num_files_to_delete = 2
+            expected_msg = (
+                f"Reprocessing {num_files_to_delete}/{dset_test1_num_proc} shards because some of them "
+                "were missing from the cache."
+            )
+            for cache_file in dset_test1_data_files[num_files_to_delete:]:
+                os.remove(cache_file["filename"])
+
+            self._caplog.clear()
+            dset_test2_num_proc = 1
+            with dset.map(lambda x: {"foo": "bar"}, num_proc=dset_test2_num_proc) as dset_test2:
+                self.assertEqual(dset_test1_data_files, dset_test2.cache_files)
+                self.assertEqual(len(dset_test2.cache_files), 0 if in_memory else dset_test1_num_proc)
+                self.assertTrue((expected_msg in self._caplog.text) ^ in_memory)
+                self.assertFalse(f"Spawning {dset_test1_num_proc} processes" in self._caplog.text)
+                self.assertFalse(f"Spawning {dset_test2_num_proc} processes" in self._caplog.text)
+
+            for cache_file in dset_test1_data_files[num_files_to_delete:]:
+                os.remove(cache_file["filename"])
+
+            self._caplog.clear()
+            dset_test3_num_proc = 3
+            with dset.map(lambda x: {"foo": "bar"}, num_proc=dset_test3_num_proc) as dset_test3:
+                self.assertEqual(dset_test1_data_files, dset_test3.cache_files)
+                self.assertEqual(len(dset_test3.cache_files), 0 if in_memory else dset_test1_num_proc)
+                self.assertTrue((expected_msg in self._caplog.text) ^ in_memory)
+                self.assertTrue(f"Spawning {dset_test3_num_proc} processes" in self._caplog.text)
 
     def test_map_return_pa_table(self, in_memory):
         def func_return_single_row_pa_table(x):
@@ -1777,9 +1923,9 @@ class BaseDatasetTest(TestCase):
             dset = Dataset.from_dict({"col": [0, 1, 2]})
             with self._to(in_memory, tmp_dir, dset) as dset:
                 with dset.filter(lambda x: x["col"] > 0) as dset:
-                    self.assertListEqual(dset["col"], [1, 2])
+                    self.assertListEqual(dset["col"][:], [1, 2])
                     with dset.filter(lambda x: x["col"] < 2) as dset:
-                        self.assertListEqual(dset["col"], [1])
+                        self.assertListEqual(dset["col"][:], [1])
 
     def test_filter_empty(self, in_memory):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -1801,9 +1947,9 @@ class BaseDatasetTest(TestCase):
             dset = Dataset.from_dict({"col": [0, 1, 2]})
             with self._to(in_memory, tmp_dir, dset) as dset:
                 with dset.filter(lambda x: [i > 0 for i in x["col"]], batched=True) as dset:
-                    self.assertListEqual(dset["col"], [1, 2])
+                    self.assertListEqual(dset["col"][:], [1, 2])
                     with dset.filter(lambda x: [i < 2 for i in x["col"]], batched=True) as dset:
-                        self.assertListEqual(dset["col"], [1])
+                        self.assertListEqual(dset["col"][:], [1])
 
     def test_filter_input_columns(self, in_memory):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -1811,8 +1957,8 @@ class BaseDatasetTest(TestCase):
             with self._to(in_memory, tmp_dir, dset) as dset:
                 with dset.filter(lambda x: x > 0, input_columns=["col_1"]) as filtered_dset:
                     self.assertListEqual(filtered_dset.column_names, dset.column_names)
-                    self.assertListEqual(filtered_dset["col_1"], [1, 2])
-                    self.assertListEqual(filtered_dset["col_2"], ["b", "c"])
+                    self.assertListEqual(filtered_dset["col_1"][:], [1, 2])
+                    self.assertListEqual(filtered_dset["col_2"][:], ["b", "c"])
 
     def test_filter_fn_kwargs(self, in_memory):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -2177,12 +2323,12 @@ class BaseDatasetTest(TestCase):
                     # Reproducibility
                     tmp_file = os.path.join(tmp_dir, "test_2.arrow")
                     with dset.shuffle(seed=1234, indices_cache_file_name=tmp_file) as dset_shuffled_2:
-                        self.assertListEqual(dset_shuffled["filename"], dset_shuffled_2["filename"])
+                        self.assertSequenceEqual(dset_shuffled["filename"], dset_shuffled_2["filename"])
 
                 # Compatible with temp_seed
                 with temp_seed(42), dset.shuffle() as d1:
                     with temp_seed(42), dset.shuffle() as d2, dset.shuffle() as d3:
-                        self.assertListEqual(d1["filename"], d2["filename"])
+                        self.assertSequenceEqual(d1["filename"], d2["filename"])
                         self.assertEqual(d1._fingerprint, d2._fingerprint)
                         self.assertNotEqual(d3["filename"], d2["filename"])
                         self.assertNotEqual(d3._fingerprint, d2._fingerprint)
@@ -2630,10 +2776,12 @@ class BaseDatasetTest(TestCase):
             tmp_file = os.path.join(tmp_dir, "test.arrow")
             with dset.select(range(10), indices_cache_file_name=tmp_file) as dset:
                 self.assertEqual(len(dset), 10)
-                # Shard
+                # Shard non-contiguous
                 tmp_file_1 = os.path.join(tmp_dir, "test_1.arrow")
                 fingerprint = dset._fingerprint
-                with dset.shard(num_shards=8, index=1, indices_cache_file_name=tmp_file_1) as dset_sharded:
+                with dset.shard(
+                    num_shards=8, index=1, contiguous=False, indices_cache_file_name=tmp_file_1
+                ) as dset_sharded:
                     self.assertEqual(2, len(dset_sharded))
                     self.assertEqual(["my_name-train_1", "my_name-train_9"], dset_sharded["filename"])
                     self.assertDictEqual(dset.features, Features({"filename": Value("string")}))
@@ -2715,9 +2863,11 @@ class BaseDatasetTest(TestCase):
         import tensorflow as tf
         import torch
 
-        with tempfile.TemporaryDirectory() as tmp_dir, self._create_dummy_dataset(
-            in_memory, tmp_dir
-        ) as dset, dset.map(lambda ex, i: {"vec": np.ones(3) * i}, with_indices=True) as dset:
+        with (
+            tempfile.TemporaryDirectory() as tmp_dir,
+            self._create_dummy_dataset(in_memory, tmp_dir) as dset,
+            dset.map(lambda ex, i: {"vec": np.ones(3) * i}, with_indices=True) as dset,
+        ):
             columns = dset.column_names
 
             self.assertIsNotNone(dset[0])
@@ -2735,7 +2885,7 @@ class BaseDatasetTest(TestCase):
             for col in columns:
                 self.assertIsInstance(dset[0][col], (tf.Tensor, tf.RaggedTensor))
                 self.assertIsInstance(dset[:2][col], (tf.Tensor, tf.RaggedTensor))
-                self.assertIsInstance(dset[col], (tf.Tensor, tf.RaggedTensor))
+                self.assertIsInstance(dset[col][:2], (tf.Tensor, tf.RaggedTensor))
             self.assertTupleEqual(tuple(dset[:2]["vec"].shape), (2, 3))
             self.assertTupleEqual(tuple(dset["vec"][:2].shape), (2, 3))
 
@@ -2744,10 +2894,10 @@ class BaseDatasetTest(TestCase):
             self.assertIsNotNone(dset[:2])
             self.assertIsInstance(dset[0]["filename"], np.str_)
             self.assertIsInstance(dset[:2]["filename"], np.ndarray)
-            self.assertIsInstance(dset["filename"], np.ndarray)
+            self.assertIsInstance(dset["filename"][:], np.ndarray)
             self.assertIsInstance(dset[0]["vec"], np.ndarray)
             self.assertIsInstance(dset[:2]["vec"], np.ndarray)
-            self.assertIsInstance(dset["vec"], np.ndarray)
+            self.assertIsInstance(dset["vec"][:2], np.ndarray)
             self.assertTupleEqual(dset[:2]["vec"].shape, (2, 3))
             self.assertTupleEqual(dset["vec"][:2].shape, (2, 3))
 
@@ -2768,9 +2918,11 @@ class BaseDatasetTest(TestCase):
         import tensorflow as tf
         import torch
 
-        with tempfile.TemporaryDirectory() as tmp_dir, self._create_dummy_dataset(
-            in_memory, tmp_dir
-        ) as dset, dset.map(lambda ex, i: {"vec": np.ones(3 + i) * i}, with_indices=True) as dset:
+        with (
+            tempfile.TemporaryDirectory() as tmp_dir,
+            self._create_dummy_dataset(in_memory, tmp_dir) as dset,
+            dset.map(lambda ex, i: {"vec": np.ones(3 + i) * i}, with_indices=True) as dset,
+        ):
             columns = dset.column_names
 
             self.assertIsNotNone(dset[0])
@@ -2788,7 +2940,7 @@ class BaseDatasetTest(TestCase):
             for col in columns:
                 self.assertIsInstance(dset[0][col], tf.Tensor)
                 self.assertIsInstance(dset[:2][col], tf.RaggedTensor if col == "vec" else tf.Tensor)
-                self.assertIsInstance(dset[col], tf.RaggedTensor if col == "vec" else tf.Tensor)
+                self.assertIsInstance(dset[col][:2], tf.RaggedTensor if col == "vec" else tf.Tensor)
             # dim is None for ragged vectors in tensorflow
             self.assertListEqual(dset[:2]["vec"].shape.as_list(), [2, None])
             self.assertListEqual(dset["vec"][:2].shape.as_list(), [2, None])
@@ -2798,10 +2950,10 @@ class BaseDatasetTest(TestCase):
             self.assertIsNotNone(dset[:2])
             self.assertIsInstance(dset[0]["filename"], np.str_)
             self.assertIsInstance(dset[:2]["filename"], np.ndarray)
-            self.assertIsInstance(dset["filename"], np.ndarray)
+            self.assertIsInstance(dset["filename"][:2], np.ndarray)
             self.assertIsInstance(dset[0]["vec"], np.ndarray)
             self.assertIsInstance(dset[:2]["vec"], np.ndarray)
-            self.assertIsInstance(dset["vec"], np.ndarray)
+            self.assertIsInstance(dset["vec"][:], np.ndarray)
             # array is flat for ragged vectors in numpy
             self.assertTupleEqual(dset[:2]["vec"].shape, (2,))
             self.assertTupleEqual(dset["vec"][:2].shape, (2,))
@@ -2811,7 +2963,7 @@ class BaseDatasetTest(TestCase):
             self.assertIsNotNone(dset[:2])
             self.assertIsInstance(dset[0]["filename"], str)
             self.assertIsInstance(dset[:2]["filename"], list)
-            self.assertIsInstance(dset["filename"], list)
+            self.assertIsInstance(dset["filename"][:2], list)
             self.assertIsInstance(dset[0]["vec"], torch.Tensor)
             self.assertIsInstance(dset[:2]["vec"][0], torch.Tensor)
             self.assertIsInstance(dset["vec"][0], torch.Tensor)
@@ -2828,9 +2980,11 @@ class BaseDatasetTest(TestCase):
         import tensorflow as tf
         import torch
 
-        with tempfile.TemporaryDirectory() as tmp_dir, self._create_dummy_dataset(
-            in_memory, tmp_dir
-        ) as dset, dset.map(lambda ex: {"nested": [{"foo": np.ones(3)}] * len(ex["filename"])}, batched=True) as dset:
+        with (
+            tempfile.TemporaryDirectory() as tmp_dir,
+            self._create_dummy_dataset(in_memory, tmp_dir) as dset,
+            dset.map(lambda ex: {"nested": [{"foo": np.ones(3)}] * len(ex["filename"])}, batched=True) as dset,
+        ):
             self.assertDictEqual(
                 dset.features, Features({"filename": Value("string"), "nested": {"foo": Sequence(Value("float64"))}})
             )
@@ -3106,12 +3260,11 @@ class BaseDatasetTest(TestCase):
             self.assertEqual(len(tf_dataset), 2)  # One batch of 3 and one batch of 1
             self.assertEqual(len(tf_dataset_with_drop), 1)  # Incomplete batch of 1 is dropped
         # Test that `NotImplementedError` is raised `batch_size` is None and `num_workers` is > 0
-        if sys.version_info >= (3, 8):
-            with self._create_dummy_dataset(in_memory, tmp_dir.name, multiple_columns=True) as dset:
-                with self.assertRaisesRegex(
-                    NotImplementedError, "`batch_size` must be specified when using multiple workers"
-                ):
-                    dset.to_tf_dataset(columns="col_1", batch_size=None, num_workers=2)
+        with self._create_dummy_dataset(in_memory, tmp_dir.name, multiple_columns=True) as dset:
+            with self.assertRaisesRegex(
+                NotImplementedError, "`batch_size` must be specified when using multiple workers"
+            ):
+                dset.to_tf_dataset(columns="col_1", batch_size=None, num_workers=2)
         del tf_dataset  # For correct cleanup
         del tf_dataset_with_drop
 
@@ -3121,22 +3274,22 @@ class MiscellaneousDatasetTest(TestCase):
         data = {"col_1": [3, 2, 1, 0], "col_2": ["a", "b", "c", "d"]}
         df = pd.DataFrame.from_dict(data)
         with Dataset.from_pandas(df) as dset:
-            self.assertListEqual(dset["col_1"], data["col_1"])
-            self.assertListEqual(dset["col_2"], data["col_2"])
+            self.assertSequenceEqual(dset["col_1"], data["col_1"])
+            self.assertSequenceEqual(dset["col_2"], data["col_2"])
             self.assertListEqual(list(dset.features.keys()), ["col_1", "col_2"])
             self.assertDictEqual(dset.features, Features({"col_1": Value("int64"), "col_2": Value("string")}))
 
         features = Features({"col_1": Value("int64"), "col_2": Value("string")})
         with Dataset.from_pandas(df, features=features) as dset:
-            self.assertListEqual(dset["col_1"], data["col_1"])
-            self.assertListEqual(dset["col_2"], data["col_2"])
+            self.assertSequenceEqual(dset["col_1"], data["col_1"])
+            self.assertSequenceEqual(dset["col_2"], data["col_2"])
             self.assertListEqual(list(dset.features.keys()), ["col_1", "col_2"])
             self.assertDictEqual(dset.features, Features({"col_1": Value("int64"), "col_2": Value("string")}))
 
         features = Features({"col_1": Value("int64"), "col_2": Value("string")})
         with Dataset.from_pandas(df, features=features, info=DatasetInfo(features=features)) as dset:
-            self.assertListEqual(dset["col_1"], data["col_1"])
-            self.assertListEqual(dset["col_2"], data["col_2"])
+            self.assertSequenceEqual(dset["col_1"], data["col_1"])
+            self.assertSequenceEqual(dset["col_2"], data["col_2"])
             self.assertListEqual(list(dset.features.keys()), ["col_1", "col_2"])
             self.assertDictEqual(dset.features, Features({"col_1": Value("int64"), "col_2": Value("string")}))
 
@@ -3150,22 +3303,22 @@ class MiscellaneousDatasetTest(TestCase):
         data = {"col_1": [3, 2, 1, 0], "col_2": ["a", "b", "c", "d"]}
         df = pl.from_dict(data)
         with Dataset.from_polars(df) as dset:
-            self.assertListEqual(dset["col_1"], data["col_1"])
-            self.assertListEqual(dset["col_2"], data["col_2"])
+            self.assertSequenceEqual(dset["col_1"], data["col_1"])
+            self.assertSequenceEqual(dset["col_2"], data["col_2"])
             self.assertListEqual(list(dset.features.keys()), ["col_1", "col_2"])
             self.assertDictEqual(dset.features, Features({"col_1": Value("int64"), "col_2": Value("large_string")}))
 
         features = Features({"col_1": Value("int64"), "col_2": Value("large_string")})
         with Dataset.from_polars(df, features=features) as dset:
-            self.assertListEqual(dset["col_1"], data["col_1"])
-            self.assertListEqual(dset["col_2"], data["col_2"])
+            self.assertSequenceEqual(dset["col_1"], data["col_1"])
+            self.assertSequenceEqual(dset["col_2"], data["col_2"])
             self.assertListEqual(list(dset.features.keys()), ["col_1", "col_2"])
             self.assertDictEqual(dset.features, Features({"col_1": Value("int64"), "col_2": Value("large_string")}))
 
         features = Features({"col_1": Value("int64"), "col_2": Value("large_string")})
         with Dataset.from_polars(df, features=features, info=DatasetInfo(features=features)) as dset:
-            self.assertListEqual(dset["col_1"], data["col_1"])
-            self.assertListEqual(dset["col_2"], data["col_2"])
+            self.assertSequenceEqual(dset["col_1"], data["col_1"])
+            self.assertSequenceEqual(dset["col_2"], data["col_2"])
             self.assertListEqual(list(dset.features.keys()), ["col_1", "col_2"])
             self.assertDictEqual(dset.features, Features({"col_1": Value("int64"), "col_2": Value("large_string")}))
 
@@ -3175,9 +3328,9 @@ class MiscellaneousDatasetTest(TestCase):
     def test_from_dict(self):
         data = {"col_1": [3, 2, 1, 0], "col_2": ["a", "b", "c", "d"], "col_3": pa.array([True, False, True, False])}
         with Dataset.from_dict(data) as dset:
-            self.assertListEqual(dset["col_1"], data["col_1"])
-            self.assertListEqual(dset["col_2"], data["col_2"])
-            self.assertListEqual(dset["col_3"], data["col_3"].to_pylist())
+            self.assertSequenceEqual(dset["col_1"], data["col_1"])
+            self.assertSequenceEqual(dset["col_2"], data["col_2"])
+            self.assertSequenceEqual(dset["col_3"], data["col_3"].to_pylist())
             self.assertListEqual(list(dset.features.keys()), ["col_1", "col_2", "col_3"])
             self.assertDictEqual(
                 dset.features, Features({"col_1": Value("int64"), "col_2": Value("string"), "col_3": Value("bool")})
@@ -3185,9 +3338,9 @@ class MiscellaneousDatasetTest(TestCase):
 
         features = Features({"col_1": Value("int64"), "col_2": Value("string"), "col_3": Value("bool")})
         with Dataset.from_dict(data, features=features) as dset:
-            self.assertListEqual(dset["col_1"], data["col_1"])
-            self.assertListEqual(dset["col_2"], data["col_2"])
-            self.assertListEqual(dset["col_3"], data["col_3"].to_pylist())
+            self.assertSequenceEqual(dset["col_1"], data["col_1"])
+            self.assertSequenceEqual(dset["col_2"], data["col_2"])
+            self.assertSequenceEqual(dset["col_3"], data["col_3"].to_pylist())
             self.assertListEqual(list(dset.features.keys()), ["col_1", "col_2", "col_3"])
             self.assertDictEqual(
                 dset.features, Features({"col_1": Value("int64"), "col_2": Value("string"), "col_3": Value("bool")})
@@ -3195,9 +3348,9 @@ class MiscellaneousDatasetTest(TestCase):
 
         features = Features({"col_1": Value("int64"), "col_2": Value("string"), "col_3": Value("bool")})
         with Dataset.from_dict(data, features=features, info=DatasetInfo(features=features)) as dset:
-            self.assertListEqual(dset["col_1"], data["col_1"])
-            self.assertListEqual(dset["col_2"], data["col_2"])
-            self.assertListEqual(dset["col_3"], data["col_3"].to_pylist())
+            self.assertSequenceEqual(dset["col_1"], data["col_1"])
+            self.assertSequenceEqual(dset["col_2"], data["col_2"])
+            self.assertSequenceEqual(dset["col_3"], data["col_3"].to_pylist())
             self.assertListEqual(list(dset.features.keys()), ["col_1", "col_2", "col_3"])
             self.assertDictEqual(
                 dset.features, Features({"col_1": Value("int64"), "col_2": Value("string"), "col_3": Value("bool")})
@@ -3206,9 +3359,9 @@ class MiscellaneousDatasetTest(TestCase):
         features = Features({"col_1": Value("string"), "col_2": Value("string"), "col_3": Value("int32")})
         with Dataset.from_dict(data, features=features) as dset:
             # the integers are converted to strings
-            self.assertListEqual(dset["col_1"], [str(x) for x in data["col_1"]])
-            self.assertListEqual(dset["col_2"], data["col_2"])
-            self.assertListEqual(dset["col_3"], [int(x) for x in data["col_3"].to_pylist()])
+            self.assertSequenceEqual(dset["col_1"], [str(x) for x in data["col_1"]])
+            self.assertSequenceEqual(dset["col_2"], data["col_2"])
+            self.assertSequenceEqual(dset["col_3"], [int(x) for x in data["col_3"].to_pylist()])
             self.assertListEqual(list(dset.features.keys()), ["col_1", "col_2", "col_3"])
             self.assertDictEqual(
                 dset.features, Features({"col_1": Value("string"), "col_2": Value("string"), "col_3": Value("int32")})
@@ -3222,14 +3375,14 @@ class MiscellaneousDatasetTest(TestCase):
         info1 = DatasetInfo(description="Dataset1")
         info2 = DatasetInfo(description="Dataset2")
         with tempfile.TemporaryDirectory() as tmp_dir:
-            with Dataset.from_dict(data1, info=info1).map(
-                cache_file_name=os.path.join(tmp_dir, "d1.arrow")
-            ) as dset1, Dataset.from_dict(data2, info=info2).map(
-                cache_file_name=os.path.join(tmp_dir, "d2.arrow")
-            ) as dset2, Dataset.from_dict(data3) as dset3:
+            with (
+                Dataset.from_dict(data1, info=info1).map(cache_file_name=os.path.join(tmp_dir, "d1.arrow")) as dset1,
+                Dataset.from_dict(data2, info=info2).map(cache_file_name=os.path.join(tmp_dir, "d2.arrow")) as dset2,
+                Dataset.from_dict(data3) as dset3,
+            ):
                 with concatenate_datasets([dset1, dset2, dset3]) as concatenated_dset:
                     self.assertEqual(len(concatenated_dset), len(dset1) + len(dset2) + len(dset3))
-                    self.assertListEqual(concatenated_dset["id"], dset1["id"] + dset2["id"] + dset3["id"])
+                    self.assertSequenceEqual(concatenated_dset["id"], dset1["id"][:] + dset2["id"][:] + dset3["id"][:])
 
     @require_transformers
     @pytest.mark.integration
@@ -4128,9 +4281,10 @@ def test_dataset_to_json(dataset, tmp_path):
 )
 def test_pickle_dataset_after_transforming_the_table(in_memory, method_and_params, arrow_file):
     method, args, kwargs = method_and_params
-    with Dataset.from_file(arrow_file, in_memory=in_memory) as dataset, Dataset.from_file(
-        arrow_file, in_memory=in_memory
-    ) as reference_dataset:
+    with (
+        Dataset.from_file(arrow_file, in_memory=in_memory) as dataset,
+        Dataset.from_file(arrow_file, in_memory=in_memory) as reference_dataset,
+    ):
         out = getattr(dataset, method)(*args, **kwargs)
         dataset = out if out is not None else dataset
         pickled_dataset = pickle.dumps(dataset)
@@ -4156,7 +4310,7 @@ def test_dummy_dataset_serialize_fs(dataset, mockfs):
     [
         "relative/path",
         "/absolute/path",
-        "s3://bucket/relative/path",
+        "hf://bucket/relative/path",
         "hdfs://relative/path",
         "hdfs:///absolute/path",
     ],
@@ -4170,7 +4324,7 @@ def test_build_local_temp_path(uri_or_path):
 
     assert (
         "hdfs://" not in path_relative_to_tmp_dir
-        and "s3://" not in path_relative_to_tmp_dir
+        and "hf://" not in path_relative_to_tmp_dir
         and not local_temp_path.startswith(extracted_path_without_anchor)
         and local_temp_path.endswith(extracted_path_without_anchor)
     ), f"Local temp path: {local_temp_path}"
@@ -4268,11 +4422,12 @@ def test_dataset_to_iterable_dataset(dataset: Dataset):
     assert isinstance(iterable_dataset, IterableDataset)
     assert list(iterable_dataset) == list(dataset)
     assert iterable_dataset.features == dataset.features
-    assert iterable_dataset.n_shards == 3
+    assert iterable_dataset.num_shards == 3
     with pytest.raises(ValueError):
         dataset.to_iterable_dataset(num_shards=len(dataset) + 1)
+    assert dataset.with_format("torch").to_iterable_dataset()._formatting.format_type == "torch"
     with pytest.raises(NotImplementedError):
-        dataset.with_format("torch").to_iterable_dataset()
+        dataset.with_format("torch", columns=[dataset.column_names[0]]).to_iterable_dataset()
 
 
 @require_pil
@@ -4410,6 +4565,50 @@ def test_map_cases(return_lazy_dict):
     ds = ds.map(f)
     outputs = ds[:]
     assert outputs == {"a": [{"nested": [[i]]} for i in [-1, -1, 2, 3]]}
+
+
+def test_map_async():
+    dset = Dataset.from_dict({"x": range(100)})
+
+    async def f(example):
+        await asyncio.sleep(0.1)
+        return {"y": 1}
+
+    _start = time.time()
+    out = dset.map(f)
+    assert time.time() - _start < 2.0
+    assert out[0]["y"] == 1
+
+    async def f(batch):
+        await asyncio.sleep(0.1)
+        return {"y": [1] * len(batch["x"])}
+
+    _start = time.time()
+    out = dset.map(f, batched=True)
+    assert time.time() - _start < 2.0
+    assert out[0]["y"] == 1
+
+
+def test_filter_async():
+    dset = Dataset.from_dict({"x": range(100)})
+
+    async def f(example):
+        await asyncio.sleep(0.1)
+        return example["x"] == 42
+
+    _start = time.time()
+    out = dset.filter(f)
+    assert time.time() - _start < 2.0
+    assert len(out) == 1
+
+    async def f(batch):
+        await asyncio.sleep(0.1)
+        return [x == 42 for x in batch["x"]]
+
+    _start = time.time()
+    out = dset.filter(f, batched=True)
+    assert time.time() - _start < 2.0
+    assert len(out) == 1
 
 
 def test_dataset_getitem_raises():

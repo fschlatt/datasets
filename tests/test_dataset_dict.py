@@ -24,9 +24,15 @@ from .utils import (
 
 
 class DatasetDictTest(TestCase):
-    def _create_dummy_dataset(self, multiple_columns=False):
+    def _create_dummy_dataset(self, multiple_columns=False, int_to_float=False):
         if multiple_columns:
             data = {"col_1": [3, 2, 1, 0], "col_2": ["a", "b", "c", "d"]}
+            dset = Dataset.from_dict(data)
+        elif int_to_float:
+            data = {
+                "text": ["text1", "text2", "text3", "text4"],
+                "labels": [[1, 1, 1, 0, 0], [0, 0, 0, 1, 0], [0, 0, 0, 1, 1], [0, 0, 0, 1, 0]],
+            }
             dset = Dataset.from_dict(data)
         else:
             dset = Dataset.from_dict(
@@ -34,11 +40,11 @@ class DatasetDictTest(TestCase):
             )
         return dset
 
-    def _create_dummy_dataset_dict(self, multiple_columns=False) -> DatasetDict:
+    def _create_dummy_dataset_dict(self, multiple_columns=False, int_to_float=False) -> DatasetDict:
         return DatasetDict(
             {
-                "train": self._create_dummy_dataset(multiple_columns=multiple_columns),
-                "test": self._create_dummy_dataset(multiple_columns=multiple_columns),
+                "train": self._create_dummy_dataset(multiple_columns=multiple_columns, int_to_float=int_to_float),
+                "test": self._create_dummy_dataset(multiple_columns=multiple_columns, int_to_float=int_to_float),
             }
         )
 
@@ -325,6 +331,28 @@ class DatasetDictTest(TestCase):
             self.assertListEqual(sorted(mapped_dsets_2["train"].column_names), sorted(["filename", "foo", "bar"]))
             del dsets, mapped_dsets_1, mapped_dsets_2
 
+        # casting int labels to float labels
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            dset_dict = self._create_dummy_dataset_dict(int_to_float=True)
+
+            def _preprocess(examples):
+                result = {"labels": [list(map(float, labels)) for labels in examples["labels"]]}
+                return result
+
+            with dset_dict.map(
+                _preprocess, remove_columns=["labels", "text"], batched=True, try_original_type=True
+            ) as dset_test:
+                for labels in dset_test["test"]["labels"]:
+                    for label in labels:
+                        self.assertIsInstance(label, int)
+
+            with dset_dict.map(
+                _preprocess, remove_columns=["labels", "text"], batched=True, try_original_type=False
+            ) as dset_test:
+                for labels in dset_test["test"]["labels"]:
+                    for label in labels:
+                        self.assertIsInstance(label, float)
+
     def test_iterable_map(self):
         dsets = self._create_dummy_iterable_dataset_dict()
         fn_kwargs = {"n": 3}
@@ -415,7 +443,7 @@ class DatasetDictTest(TestCase):
             dsets_shuffled = dsets.shuffle(
                 seeds=seeds, indices_cache_file_names=indices_cache_file_names, load_from_cache_file=False
             )
-            self.assertListEqual(dsets_shuffled["train"]["filename"], dsets_shuffled["test"]["filename"])
+            self.assertSequenceEqual(dsets_shuffled["train"]["filename"], dsets_shuffled["test"]["filename"])
 
             self.assertEqual(len(dsets_shuffled["train"]), 30)
             self.assertEqual(dsets_shuffled["train"][0]["filename"], "my_name-train_028")
@@ -431,7 +459,7 @@ class DatasetDictTest(TestCase):
             dsets_shuffled_2 = dsets.shuffle(
                 seeds=seeds, indices_cache_file_names=indices_cache_file_names_2, load_from_cache_file=False
             )
-            self.assertListEqual(dsets_shuffled["train"]["filename"], dsets_shuffled_2["train"]["filename"])
+            self.assertSequenceEqual(dsets_shuffled["train"]["filename"], dsets_shuffled_2["train"]["filename"])
 
             seeds = {
                 "train": 1234,
@@ -573,8 +601,8 @@ class DatasetDictTest(TestCase):
             }
         )
         dsets = dsets.align_labels_with_mapping(label2id, "input_labels")
-        self.assertListEqual(train_expected_labels, dsets["train"]["input_labels"])
-        self.assertListEqual(test_expected_labels, dsets["test"]["input_labels"])
+        self.assertListEqual(train_expected_labels, dsets["train"]["input_labels"][:])
+        self.assertListEqual(test_expected_labels, dsets["test"]["input_labels"][:])
         train_aligned_label_names = [
             dsets["train"].features["input_labels"].int2str(idx) for idx in dsets["train"]["input_labels"]
         ]

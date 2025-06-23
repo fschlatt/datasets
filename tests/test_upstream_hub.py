@@ -22,6 +22,7 @@ from datasets import (
     DownloadManager,
     Features,
     Image,
+    IterableDatasetDict,
     Value,
     load_dataset,
     load_dataset_builder,
@@ -37,14 +38,14 @@ from datasets.utils.file_utils import cached_path
 from datasets.utils.hub import hf_dataset_url
 
 from .fixtures.hub import CI_HUB_ENDPOINT, CI_HUB_USER, CI_HUB_USER_TOKEN
-from .utils import for_all_test_methods, require_librosa, require_pil, require_sndfile, xfail_if_500_502_http_error
+from .utils import for_all_test_methods, require_pil, require_sndfile, require_torchcodec, xfail_if_500_502_http_error
 
 
 pytestmark = pytest.mark.integration
 
 
 @for_all_test_methods(xfail_if_500_502_http_error)
-@pytest.mark.usefixtures("ci_hub_config", "ci_hfh_hf_hub_url")
+@pytest.mark.usefixtures("ci_hub_config")
 class TestPushToHub:
     _api = HfApi(endpoint=CI_HUB_ENDPOINT)
     _token = CI_HUB_USER_TOKEN
@@ -242,8 +243,9 @@ class TestPushToHub:
         with temporary_repo() as ds_name:
             self._api.create_repo(ds_name, token=self._token, repo_type="dataset")
             num_commits_before_push = len(self._api.list_repo_commits(ds_name, repo_type="dataset", token=self._token))
-            with patch("datasets.config.MAX_SHARD_SIZE", "16KB"), patch(
-                "datasets.config.UPLOADS_MAX_NUMBER_PER_COMMIT", 1
+            with (
+                patch("datasets.config.MAX_SHARD_SIZE", "16KB"),
+                patch("datasets.config.UPLOADS_MAX_NUMBER_PER_COMMIT", 1),
             ):
                 local_ds.push_to_hub(ds_name, token=self._token)
             hub_ds = load_dataset(ds_name, download_mode="force_redownload")
@@ -385,7 +387,7 @@ class TestPushToHub:
             assert ds.features == hub_ds.features
             assert ds[:] == hub_ds[:]
 
-    @require_librosa
+    @require_torchcodec
     @require_sndfile
     def test_push_dataset_to_hub_custom_features_audio(self, temporary_repo):
         audio_path = os.path.join(os.path.dirname(__file__), "features", "data", "test_audio_44100.wav")
@@ -401,7 +403,10 @@ class TestPushToHub:
                 assert ds.column_names == hub_ds.column_names
                 assert list(ds.features.keys()) == list(hub_ds.features.keys())
                 assert ds.features == hub_ds.features
-                np.testing.assert_equal(ds[0]["x"]["array"], hub_ds[0]["x"]["array"])
+                np.testing.assert_equal(
+                    ds[0]["x"].get_all_samples().data.cpu().numpy(),
+                    hub_ds[0]["x"].get_all_samples().data.cpu().numpy(),
+                )
                 assert ds[1] == hub_ds[1]  # don't test hub_ds[0] since audio decoding might be slightly different
                 hub_ds = hub_ds.cast_column("x", Audio(decode=False))
                 elem = hub_ds[0]["x"]
@@ -872,6 +877,68 @@ class TestPushToHub:
                 "*/another_config/random-00000-of-00001.parquet",
             )
 
+    def test_push_dataset_dict_to_hub_num_proc(self, temporary_repo, set_ci_hub_access_token):
+        ds = Dataset.from_dict({"x": [1, 2, 3], "y": [4, 5, 6]})
+
+        local_ds = DatasetDict({"train": ds})
+
+        with temporary_repo() as ds_name:
+            local_ds.push_to_hub(ds_name, num_proc=2)
+            hub_ds = load_dataset(ds_name, download_mode="force_redownload")
+
+            assert local_ds.column_names == hub_ds.column_names
+            assert list(local_ds["train"].features.keys()) == list(hub_ds["train"].features.keys())
+            assert local_ds["train"].features == hub_ds["train"].features
+
+            # Ensure that there is a single file on the repository that has the correct name
+            files = sorted(self._api.list_repo_files(ds_name, repo_type="dataset"))
+            assert files == [
+                ".gitattributes",
+                "README.md",
+                "data/train-00000-of-00002.parquet",
+                "data/train-00001-of-00002.parquet",
+            ]
+
+    def test_push_dataset_dict_to_hub_iterable(self, temporary_repo, set_ci_hub_access_token):
+        ds = Dataset.from_dict({"x": [1, 2, 3], "y": [4, 5, 6]}).to_iterable_dataset()
+
+        local_ds = IterableDatasetDict({"train": ds})
+
+        with temporary_repo() as ds_name:
+            local_ds.push_to_hub(ds_name)
+            hub_ds = load_dataset(ds_name, download_mode="force_redownload")
+
+            assert local_ds.column_names == hub_ds.column_names
+            assert list(local_ds["train"].features.keys()) == list(hub_ds["train"].features.keys())
+            assert local_ds["train"].features == hub_ds["train"].features
+
+            # Ensure that there is a single file on the repository that has the correct name
+            files = sorted(self._api.list_repo_files(ds_name, repo_type="dataset"))
+            assert files == [".gitattributes", "README.md", "data/train-00000-of-00001.parquet"]
+
+    def test_push_dataset_dict_to_hub_iterable_num_proc(self, temporary_repo, set_ci_hub_access_token):
+        ds = Dataset.from_dict({"x": [1, 2, 3], "y": [4, 5, 6]}).to_iterable_dataset(num_shards=3)
+
+        local_ds = IterableDatasetDict({"train": ds})
+
+        with temporary_repo() as ds_name:
+            local_ds.push_to_hub(ds_name, num_proc=2)
+            hub_ds = load_dataset(ds_name, download_mode="force_redownload")
+
+            assert local_ds.column_names == hub_ds.column_names
+            assert list(local_ds["train"].features.keys()) == list(hub_ds["train"].features.keys())
+            assert local_ds["train"].features == hub_ds["train"].features
+
+            # Ensure that there is a single file on the repository that has the correct name
+            files = sorted(self._api.list_repo_files(ds_name, repo_type="dataset"))
+            assert files == [
+                ".gitattributes",
+                "README.md",
+                "data/train-00000-of-00003.parquet",
+                "data/train-00001-of-00003.parquet",
+                "data/train-00002-of-00003.parquet",
+            ]
+
 
 class DummyFolderBasedBuilder(FolderBasedBuilder):
     BASE_FEATURE = dict
@@ -905,7 +972,7 @@ def text_file_with_metadata(request, tmp_path, text_file):
 
 
 @for_all_test_methods(xfail_if_500_502_http_error)
-@pytest.mark.usefixtures("ci_hub_config", "ci_hfh_hf_hub_url")
+@pytest.mark.usefixtures("ci_hub_config")
 class TestLoadFromHub:
     _api = HfApi(endpoint=CI_HUB_ENDPOINT)
     _token = CI_HUB_USER_TOKEN

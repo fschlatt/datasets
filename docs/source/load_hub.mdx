@@ -12,7 +12,7 @@ Use the [`load_dataset_builder`] function to load a dataset builder and inspect 
 
 ```py
 >>> from datasets import load_dataset_builder
->>> ds_builder = load_dataset_builder("rotten_tomatoes")
+>>> ds_builder = load_dataset_builder("cornell-movie-review-data/rotten_tomatoes")
 
 # Inspect dataset description
 >>> ds_builder.info.description
@@ -20,8 +20,8 @@ Movie Review Dataset. This is a dataset of containing 5,331 positive and 5,331 n
 
 # Inspect dataset features
 >>> ds_builder.info.features
-{'label': ClassLabel(num_classes=2, names=['neg', 'pos'], id=None),
- 'text': Value(dtype='string', id=None)}
+{'label': ClassLabel(names=['neg', 'pos']),
+ 'text': Value(dtype='string')}
 ```
 
 If you're happy with the dataset, then load it with [`load_dataset`]:
@@ -29,7 +29,7 @@ If you're happy with the dataset, then load it with [`load_dataset`]:
 ```py
 >>> from datasets import load_dataset
 
->>> dataset = load_dataset("rotten_tomatoes", split="train")
+>>> dataset = load_dataset("cornell-movie-review-data/rotten_tomatoes", split="train")
 ```
 
 ## Splits
@@ -39,7 +39,7 @@ A split is a specific subset of a dataset like `train` and `test`. List a datase
 ```py
 >>> from datasets import get_dataset_split_names
 
->>> get_dataset_split_names("rotten_tomatoes")
+>>> get_dataset_split_names("cornell-movie-review-data/rotten_tomatoes")
 ['train', 'validation', 'test']
 ```
 
@@ -48,7 +48,7 @@ Then you can load a specific split with the `split` parameter. Loading a dataset
 ```py
 >>> from datasets import load_dataset
 
->>> dataset = load_dataset("rotten_tomatoes", split="train")
+>>> dataset = load_dataset("cornell-movie-review-data/rotten_tomatoes", split="train")
 >>> dataset
 Dataset({
     features: ['text', 'label'],
@@ -61,7 +61,7 @@ If you don't specify a `split`, 🤗 Datasets returns a [`DatasetDict`] object i
 ```py
 >>> from datasets import load_dataset
 
->>> dataset = load_dataset("rotten_tomatoes")
+>>> dataset = load_dataset("cornell-movie-review-data/rotten_tomatoes")
 DatasetDict({
     train: Dataset({
         features: ['text', 'label'],
@@ -99,23 +99,3 @@ Then load the configuration you want:
 
 >>> mindsFR = load_dataset("PolyAI/minds14", "fr-FR", split="train")
 ```
-
-## Remote code
-
-Certain datasets repositories contain a loading script with the Python code used to generate the dataset. All files and code uploaded to the Hub are scanned for malware (refer to the Hub security documentation for more information), but you should still review the dataset loading scripts and authors to avoid executing malicious code on your machine. You should set `trust_remote_code=True` to use a dataset with a loading script, or you will get an error:
-
-```py
->>> from datasets import get_dataset_config_names, get_dataset_split_names, load_dataset
-
->>> c4 = load_dataset("c4", "en", split="train", trust_remote_code=True)
->>> get_dataset_config_names("c4", trust_remote_code=True)
-['en', 'realnewslike', 'en.noblocklist', 'en.noclean']
->>> get_dataset_split_names("c4", "en", trust_remote_code=True)
-['train', 'validation']
-```
-
-<Tip warning=true>
-
-For security reasons, 🤗 Datasets do not allow running dataset loading scripts by default, and you have to pass `trust_remote_code=True` to load datasets that require running a dataset script.
-
-</Tip>

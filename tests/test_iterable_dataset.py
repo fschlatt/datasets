@@ -1,6 +1,10 @@
+import asyncio
 import pickle
+import time
 from copy import deepcopy
+from dataclasses import dataclass
 from itertools import chain, cycle, islice
+from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
@@ -17,7 +21,7 @@ from datasets.features import (
     Image,
     Value,
 )
-from datasets.formatting import get_format_type_from_alias
+from datasets.formatting import Formatter, get_format_type_from_alias
 from datasets.info import DatasetInfo
 from datasets.iterable_dataset import (
     ArrowExamplesIterable,
@@ -25,12 +29,15 @@ from datasets.iterable_dataset import (
     CyclingMultiSourcesExamplesIterable,
     ExamplesIterable,
     FilteredExamplesIterable,
+    FormattedExamplesIterable,
     FormattingConfig,
     HorizontallyConcatenatedMultiSourcesExamplesIterable,
+    IterableColumn,
     IterableDataset,
     MappedExamplesIterable,
     RandomlyCyclingMultiSourcesExamplesIterable,
     RebatchedArrowExamplesIterable,
+    RepeatExamplesIterable,
     SelectColumnsIterable,
     ShuffledDataSourcesArrowExamplesIterable,
     ShuffledDataSourcesExamplesIterable,
@@ -38,7 +45,6 @@ from datasets.iterable_dataset import (
     SkipExamplesIterable,
     StepExamplesIterable,
     TakeExamplesIterable,
-    TypedExamplesIterable,
     VerticallyConcatenatedMultiSourcesExamplesIterable,
     _BaseExamplesIterable,
     _batch_to_examples,
@@ -50,8 +56,10 @@ from .utils import (
     assert_arrow_memory_doesnt_increase,
     is_rng_equal,
     require_dill_gt_0_3_2,
+    require_jax,
     require_not_windows,
     require_numpy1_on_windows,
+    require_polars,
     require_pyspark,
     require_tf,
     require_torch,
@@ -59,11 +67,11 @@ from .utils import (
 )
 
 
+SAMPLE_DATASET_IDENTIFIER = "hf-internal-testing/dataset_with_data_files"
+
 DEFAULT_N_EXAMPLES = 20
 DEFAULT_BATCH_SIZE = 4
 DEFAULT_FILEPATH = "file.txt"
-
-SAMPLE_DATASET_IDENTIFIER = "hf-internal-testing/dataset_with_script"  # has dataset script
 
 
 def generate_examples_fn(**kwargs):
@@ -499,6 +507,13 @@ def test_mapped_examples_iterable_drop_last_batch(n, func, batched, batch_size):
             next(iter(ex_iterable))
 
 
+def _wrap_async(func, *args, **kwargs):
+    async def wrapped_func(*args, **kwargs):
+        return func(*args, **kwargs)
+
+    return wrapped_func
+
+
 @pytest.mark.parametrize(
     "n, func, batched, batch_size",
     [
@@ -513,10 +528,11 @@ def test_mapped_examples_iterable_drop_last_batch(n, func, batched, batch_size):
         (5, lambda x, indices: {"id+idx": [i + j for i, j in zip(x["id"], indices)]}, True, -1),  # same with bs<=0
     ],
 )
-def test_mapped_examples_iterable_with_indices(n, func, batched, batch_size):
+@pytest.mark.parametrize("wrapper", [lambda x: x, _wrap_async])
+def test_mapped_examples_iterable_with_indices(n, func, batched, batch_size, wrapper):
     base_ex_iterable = ExamplesIterable(generate_examples_fn, {"n": n})
     ex_iterable = MappedExamplesIterable(
-        base_ex_iterable, func, batched=batched, batch_size=batch_size, with_indices=True
+        base_ex_iterable, wrapper(func), batched=batched, batch_size=batch_size, with_indices=True
     )
     all_examples = [x for _, x in generate_examples_fn(n=n)]
     if batched is False:
@@ -583,6 +599,59 @@ def test_mapped_examples_iterable_remove_columns(n, func, batched, batch_size, r
     assert next(iter(ex_iterable))[1] == expected[0]
     assert [x for _, x in ex_iterable] == expected
     assert_load_state_dict_resumes_iteration(ex_iterable)
+
+
+# issue #7345 and PR #7353
+@pytest.mark.parametrize("batched", [False, True])
+@pytest.mark.parametrize("batch_size", [None, 2])
+@pytest.mark.parametrize("input_columns", [None, ["i"]])
+@pytest.mark.parametrize("remove_columns", [None, ["i"]])
+@pytest.mark.parametrize("new_output", [False, True])
+def test_iterable_dataset_vs_dataset_map(batched, batch_size, input_columns, remove_columns, new_output):
+    if input_columns is not None and not new_output:
+        return
+
+    ds1 = Dataset.from_list([{"i": i} for i in range(4)])
+
+    if batched:
+
+        def f1(i):
+            return {"i": [j + 1 for j in i]}
+    else:
+
+        def f1(i):
+            return {"i": i + 1}
+
+    if input_columns is None:
+
+        def f2(x):
+            return f1(x["i"])
+    else:
+        f2 = f1
+
+    if new_output:
+        f = f2
+    else:
+
+        def f(x):
+            x["i"] = f2(x)["i"]
+            return x
+
+    r = [
+        list(
+            ds2.map(
+                f,
+                batch_size=batch_size,
+                batched=batched,
+                remove_columns=remove_columns,
+                input_columns=input_columns,
+            )
+        )
+        for ds2 in [ds1, ds1.to_iterable_dataset()]
+    ]
+    r[1] = [x for x in r[1] if len(x) > 0]
+    assert len(r[0]) == len(r[1])
+    assert all(x == y for x, y in zip(*r))
 
 
 @pytest.mark.parametrize(
@@ -1087,15 +1156,59 @@ def test_filtered_examples_iterable_input_columns(n, func, batched, batch_size, 
     assert_load_state_dict_resumes_iteration(ex_iterable)
 
 
+def test_map_async():
+    dset = Dataset.from_dict({"x": range(100)}).to_iterable_dataset()
+
+    async def f(example):
+        await asyncio.sleep(0.1)
+        return {"y": 1}
+
+    _start = time.time()
+    out = dset.map(f)
+    assert time.time() - _start < 2.0
+    assert next(iter(out))["y"] == 1
+
+    async def f(batch):
+        await asyncio.sleep(0.1)
+        return {"y": [1] * len(batch["x"])}
+
+    _start = time.time()
+    out = dset.map(f, batched=True)
+    assert time.time() - _start < 2.0
+    assert next(iter(out))["y"] == 1
+
+
+def test_filter_async():
+    dset = Dataset.from_dict({"x": range(100)}).to_iterable_dataset()
+
+    async def f(example):
+        await asyncio.sleep(0.1)
+        return example["x"] == 42
+
+    _start = time.time()
+    out = dset.filter(f)
+    assert time.time() - _start < 2.0
+    assert len(list(out)) == 1
+
+    async def f(batch):
+        await asyncio.sleep(0.1)
+        return [x == 42 for x in batch["x"]]
+
+    _start = time.time()
+    out = dset.filter(f, batched=True)
+    assert time.time() - _start < 2.0
+    assert len(list(out)) == 1
+
+
 def test_skip_examples_iterable():
     total, count = 10, 2
     base_ex_iterable = ExamplesIterable(generate_examples_fn, {"n": total})
     skip_ex_iterable = SkipExamplesIterable(base_ex_iterable, n=count)
     expected = list(generate_examples_fn(n=total))[count:]
     assert list(skip_ex_iterable) == expected
-    assert (
-        skip_ex_iterable.shuffle_data_sources(np.random.default_rng(42)) is skip_ex_iterable
-    ), "skip examples makes the shards order fixed"
+    assert skip_ex_iterable.shuffle_data_sources(np.random.default_rng(42)) is skip_ex_iterable, (
+        "skip examples makes the shards order fixed"
+    )
     assert_load_state_dict_resumes_iteration(skip_ex_iterable)
 
 
@@ -1105,10 +1218,32 @@ def test_take_examples_iterable():
     take_ex_iterable = TakeExamplesIterable(base_ex_iterable, n=count)
     expected = list(generate_examples_fn(n=total))[:count]
     assert list(take_ex_iterable) == expected
-    assert (
-        take_ex_iterable.shuffle_data_sources(np.random.default_rng(42)) is take_ex_iterable
-    ), "skip examples makes the shards order fixed"
+    assert take_ex_iterable.shuffle_data_sources(np.random.default_rng(42)) is take_ex_iterable, (
+        "skip examples makes the shards order fixed"
+    )
     assert_load_state_dict_resumes_iteration(take_ex_iterable)
+
+
+@pytest.mark.parametrize(
+    "n, num_times",
+    [
+        (3, None),
+        (3, 3),
+        (3, 0),
+    ],
+)
+def test_repeat_examples_iterable(n, num_times):
+    base_ex_iterable = ExamplesIterable(generate_examples_fn, {"n": n})
+    ex_iterable = RepeatExamplesIterable(base_ex_iterable, num_times=num_times)
+    all_examples = [x for _, x in generate_examples_fn(n=n)]
+    if num_times is not None:
+        expected = all_examples * max(num_times, 0)
+        assert [x for _, x in ex_iterable] == expected
+    else:
+        max_iters = 135
+        iterator = iter(ex_iterable)
+        for i in range(max_iters):
+            assert next(iterator)[1] == all_examples[i % len(all_examples)], f"iteration {i} failed,"
 
 
 def test_vertically_concatenated_examples_iterable():
@@ -1155,9 +1290,9 @@ def test_horizontally_concatenated_examples_iterable():
     concatenated_ex_iterable = HorizontallyConcatenatedMultiSourcesExamplesIterable([ex_iterable1, ex_iterable2])
     expected = [{**x, **y} for (_, x), (_, y) in zip(ex_iterable1, ex_iterable2)]
     assert [x for _, x in concatenated_ex_iterable] == expected
-    assert (
-        concatenated_ex_iterable.shuffle_data_sources(np.random.default_rng(42)) is concatenated_ex_iterable
-    ), "horizontally concatenated examples makes the shards order fixed"
+    assert concatenated_ex_iterable.shuffle_data_sources(np.random.default_rng(42)) is concatenated_ex_iterable, (
+        "horizontally concatenated examples makes the shards order fixed"
+    )
     assert_load_state_dict_resumes_iteration(concatenated_ex_iterable)
 
 
@@ -1181,8 +1316,8 @@ def test_horizontally_concatenated_examples_iterable():
         BufferShuffledExamplesIterable(ExamplesIterable(generate_examples_fn, {}), 10, np.random.default_rng(42)),
         SkipExamplesIterable(ExamplesIterable(generate_examples_fn, {}), 10),
         TakeExamplesIterable(ExamplesIterable(generate_examples_fn, {}), 10),
-        TypedExamplesIterable(
-            ExamplesIterable(generate_examples_fn, {}), Features({"id": Value("int32")}), token_per_repo_id={}
+        FormattedExamplesIterable(
+            ExamplesIterable(generate_examples_fn, {}), None, Features({"id": Value("int32")}), token_per_repo_id={}
         ),
     ],
 )
@@ -1226,8 +1361,8 @@ def test_no_iter_arrow(ex_iterable: _BaseExamplesIterable):
         # BufferShuffledExamplesIterable(ArrowExamplesIterable(generate_tables_fn, {}), 10, np.random.default_rng(42)),  # not implemented
         # SkipExamplesIterable(ArrowExamplesIterable(generate_tables_fn, {}), 10),  # not implemented
         # TakeExamplesIterable(ArrowExamplesIterable(generate_tables_fn, {}), 10),  # not implemented
-        TypedExamplesIterable(
-            ArrowExamplesIterable(generate_tables_fn, {}), Features({"id": Value("int32")}), token_per_repo_id={}
+        FormattedExamplesIterable(
+            ArrowExamplesIterable(generate_tables_fn, {}), None, Features({"id": Value("int32")}), token_per_repo_id={}
         ),
     ],
 )
@@ -1277,7 +1412,7 @@ def test_iterable_dataset_from_generator_with_shards():
     shard_names = [f"data{shard_idx}.txt" for shard_idx in range(4)]
     dataset = IterableDataset.from_generator(gen, gen_kwargs={"shard_names": shard_names})
     assert isinstance(dataset, IterableDataset)
-    assert dataset.n_shards == len(shard_names)
+    assert dataset.num_shards == len(shard_names)
 
 
 @require_numpy1_on_windows
@@ -1392,11 +1527,11 @@ def test_iterable_dataset_torch_dataloader_parallel():
 
 @require_torch
 @pytest.mark.filterwarnings("ignore:This DataLoader will create:UserWarning")
-@pytest.mark.parametrize("n_shards, num_workers", [(2, 1), (2, 2), (3, 2), (2, 3)])
-def test_sharded_iterable_dataset_torch_dataloader_parallel(n_shards, num_workers):
+@pytest.mark.parametrize("num_shards, num_workers", [(2, 1), (2, 2), (3, 2), (2, 3)])
+def test_sharded_iterable_dataset_torch_dataloader_parallel(num_shards, num_workers):
     from torch.utils.data import DataLoader
 
-    ex_iterable = ExamplesIterable(generate_examples_fn, {"filepaths": [f"{i}.txt" for i in range(n_shards)]})
+    ex_iterable = ExamplesIterable(generate_examples_fn, {"filepaths": [f"{i}.txt" for i in range(num_shards)]})
     dataset = IterableDataset(ex_iterable)
     dataloader = DataLoader(dataset, batch_size=None, num_workers=num_workers)
     result = list(dataloader)
@@ -1414,7 +1549,7 @@ def test_iterable_dataset_from_hub_torch_dataloader_parallel(num_workers, tmp_pa
     dataset = load_dataset(SAMPLE_DATASET_IDENTIFIER, cache_dir=str(tmp_path), streaming=True, split="train")
     dataloader = DataLoader(dataset, batch_size=None, num_workers=num_workers)
     result = list(dataloader)
-    assert len(result) == 2
+    assert len(result) == 10
 
 
 @pytest.mark.parametrize("batch_size", [4, 5])
@@ -1446,6 +1581,17 @@ def test_iterable_dataset_set_epoch(dataset: IterableDataset):
     assert dataset._epoch == 0
     dataset.set_epoch(42)
     assert dataset._epoch == 42
+
+
+def test_iterable_dataset_set_epoch_resuming(dataset: IterableDataset):
+    dataset_length = len(list(dataset))
+    assert len(list(dataset)) == dataset_length > 0
+    dataset.load_state_dict(dataset.state_dict())
+    assert len(list(dataset)) == 0
+    dataset.set_epoch(1)
+    assert len(list(dataset)) == dataset_length > 0
+    dataset.load_state_dict(dataset.state_dict())
+    assert len(list(dataset)) == 0
 
 
 @pytest.mark.parametrize("seed", [None, 42, 1337])
@@ -1627,7 +1773,12 @@ def test_iterable_dataset_features_cast_to_python():
     assert list(dataset) == [{"timestamp": pd.Timestamp(2020, 1, 1).to_pydatetime(), "array": [1] * 5, "id": 0}]
 
 
-@pytest.mark.parametrize("format_type", [None, "torch", "python", "tf", "tensorflow", "np", "numpy", "jax"])
+@require_torch
+@require_tf
+@require_jax
+@pytest.mark.parametrize(
+    "format_type", [None, "torch", "python", "tf", "tensorflow", "np", "numpy", "jax", "arrow", "pd", "pandas"]
+)
 def test_iterable_dataset_with_format(dataset: IterableDataset, format_type):
     formatted_dataset = dataset.with_format(format_type)
     assert formatted_dataset._formatting.format_type == get_format_type_from_alias(format_type)
@@ -1681,13 +1832,44 @@ def test_iterable_dataset_take(dataset: IterableDataset, n):
     assert list(take_dataset) == list(dataset)[:n]
 
 
+@pytest.mark.parametrize("n", [0, 2])
+def test_iterable_dataset_repeat(dataset: IterableDataset, n):
+    repeat_dataset = dataset.repeat(n)
+    assert isinstance(repeat_dataset._ex_iterable, RepeatExamplesIterable)
+    assert repeat_dataset._ex_iterable.num_times == n
+    assert list(repeat_dataset) == list(dataset) * n
+
+
+def test_iterable_dataset_shard():
+    num_examples = 20
+    num_shards = 5
+    dataset = Dataset.from_dict({"a": range(num_examples)}).to_iterable_dataset(num_shards=num_shards)
+    assert sum(dataset.shard(num_shards, i).num_shards for i in range(num_shards)) == dataset.num_shards
+    assert list(concatenate_datasets([dataset.shard(num_shards, i) for i in range(num_shards)])) == list(dataset)
+    num_shards = 2
+    assert sum(dataset.shard(num_shards, i).num_shards for i in range(num_shards)) == dataset.num_shards
+    assert list(concatenate_datasets([dataset.shard(num_shards, i) for i in range(num_shards)])) == list(dataset)
+    assert (
+        sum(dataset.shard(num_shards, i, contiguous=False).num_shards for i in range(num_shards)) == dataset.num_shards
+    )
+    assert list(
+        concatenate_datasets([dataset.shard(num_shards, i, contiguous=False) for i in range(num_shards)])
+    ) != list(dataset)
+    assert sorted(
+        concatenate_datasets([dataset.shard(num_shards, i, contiguous=False) for i in range(num_shards)]),
+        key=lambda x: x["a"],
+    ) == list(dataset)
+
+
 @pytest.mark.parametrize("method", ["skip", "take"])
 @pytest.mark.parametrize("after_shuffle", [False, True])
 @pytest.mark.parametrize("count", [2, 5, 11])
 def test_iterable_dataset_skip_or_take_after_shuffle(method, after_shuffle, count):
     seed = 42
-    n, n_shards = 3, 10
-    ex_iterable = ExamplesIterable(generate_examples_fn, {"n": n, "filepaths": [f"{i}.txt" for i in range(n_shards)]})
+    n, num_shards = 3, 10
+    ex_iterable = ExamplesIterable(
+        generate_examples_fn, {"n": n, "filepaths": [f"{i}.txt" for i in range(num_shards)]}
+    )
     dataset = IterableDataset(ex_iterable)
     shuffled_dataset = dataset
     if after_shuffle:
@@ -1714,9 +1896,11 @@ def test_iterable_dataset_skip_or_take_after_shuffle(method, after_shuffle, coun
 @pytest.mark.parametrize("after_split_by_node", [False, True])
 @pytest.mark.parametrize("count", [2, 5, 11])
 def test_iterable_dataset_skip_or_take_after_split_by_node(method, after_split_by_node, count):
-    n, n_shards = 3, 10
+    n, num_shards = 3, 10
     rank, world_size = 1, 2
-    ex_iterable = ExamplesIterable(generate_examples_fn, {"n": n, "filepaths": [f"{i}.txt" for i in range(n_shards)]})
+    ex_iterable = ExamplesIterable(
+        generate_examples_fn, {"n": n, "filepaths": [f"{i}.txt" for i in range(num_shards)]}
+    )
     dataset = IterableDataset(ex_iterable)
     distributed_dataset = dataset
     true_distributed_dataset = split_dataset_by_node(dataset, rank=rank, world_size=world_size)
@@ -1944,6 +2128,18 @@ def test_concatenate_datasets_axis_1_with_different_lengths():
     assert list(concatenated_dataset) == [{**x, **y} for x, y in zip(extended_dataset2_list, dataset1)]
 
 
+@require_torch
+@require_tf
+@require_jax
+@pytest.mark.parametrize(
+    "format_type", [None, "torch", "python", "tf", "tensorflow", "np", "numpy", "jax", "arrow", "pd", "pandas"]
+)
+def test_concatenate_datasets_with_format(dataset: IterableDataset, format_type):
+    formatted_dataset = dataset.with_format(format_type)
+    concatenated_dataset = concatenate_datasets([formatted_dataset])
+    assert concatenated_dataset._formatting.format_type == get_format_type_from_alias(format_type)
+
+
 @pytest.mark.parametrize(
     "probas, seed, expected_length, stopping_strategy",
     [
@@ -2114,17 +2310,81 @@ def test_formatted_map(dataset: IterableDataset):
     assert isinstance(next(dataset.iter(batch_size=3))["id"], list)
 
 
-@pytest.mark.parametrize("n_shards1, n_shards2, num_workers", [(2, 1, 1), (2, 2, 2), (1, 3, 1), (4, 3, 3)])
-def test_interleave_dataset_with_sharding(n_shards1, n_shards2, num_workers):
+def test_format_from_arrow():
+    python_arrow_extractor = Formatter.python_arrow_extractor
+    numpy_arrow_extractor = Formatter.numpy_arrow_extractor
+
+    with (
+        patch.object(Formatter, "python_arrow_extractor") as mock_python_arrow_extractor,
+        patch.object(Formatter, "numpy_arrow_extractor") as mock_numpy_arrow_extractor,
+    ):
+        mock_python_arrow_extractor.side_effect = python_arrow_extractor
+        mock_numpy_arrow_extractor.side_effect = numpy_arrow_extractor
+
+        def g():
+            yield 0, pa.table({"a": range(10)})
+
+        ds = IterableDataset(ArrowExamplesIterable(g, {}))
+        ds = ds.with_format("np")
+        ds = ds.map(lambda x: x, batched=True)
+        next(iter(ds))
+
+        # we do arrow -> numpy -> python
+        mock_numpy_arrow_extractor.assert_called()
+        # we don't do any arrow -> python
+        mock_python_arrow_extractor.assert_not_called()
+
+
+def test_format_arrow(dataset: IterableDataset):
+    ds = dataset.with_format("arrow")
+    assert isinstance(next(iter(ds)), pa.Table)
+    assert isinstance(next(iter(ds.iter(batch_size=4))), pa.Table)
+    assert len(next(iter(ds))) == 1
+    assert len(next(iter(ds.iter(batch_size=4)))) == 4
+    ds = ds.map(lambda t: t.append_column("new_col", pa.array([0] * len(t))))
+    ds = ds.map(lambda t: t.append_column("new_col_batched", pa.array([1] * len(t))), batched=True)
+    ds = ds.with_format(None)
+    assert next(iter(ds)) == {**next(iter(dataset)), "new_col": 0, "new_col_batched": 1}
+
+
+def test_format_pandas(dataset: IterableDataset):
+    ds = dataset.with_format("pandas")
+    assert isinstance(next(iter(ds)), pd.DataFrame)
+    assert isinstance(next(iter(ds.iter(batch_size=4))), pd.DataFrame)
+    assert len(next(iter(ds))) == 1
+    assert len(next(iter(ds.iter(batch_size=4)))) == 4
+    ds = ds.map(lambda df: df.assign(new_col=[0] * len(df)))
+    ds = ds.map(lambda df: df.assign(new_col_batched=[1] * len(df)), batched=True)
+    ds = ds.with_format(None)
+    assert next(iter(ds)) == {**next(iter(dataset)), "new_col": 0, "new_col_batched": 1}
+
+
+@require_polars
+def test_format_polars(dataset: IterableDataset):
+    import polars as pl
+
+    ds = dataset.with_format("polars")
+    assert isinstance(next(iter(ds)), pl.DataFrame)
+    assert isinstance(next(iter(ds.iter(batch_size=4))), pl.DataFrame)
+    assert len(next(iter(ds))) == 1
+    assert len(next(iter(ds.iter(batch_size=4)))) == 4
+    ds = ds.map(lambda df: df.with_columns(pl.Series([0] * len(df)).alias("new_col")))
+    ds = ds.map(lambda df: df.with_columns(pl.Series([1] * len(df)).alias("new_col_batched")), batched=True)
+    ds = ds.with_format(None)
+    assert next(iter(ds)) == {**next(iter(dataset)), "new_col": 0, "new_col_batched": 1}
+
+
+@pytest.mark.parametrize("num_shards1, num_shards2, num_workers", [(2, 1, 1), (2, 2, 2), (1, 3, 1), (4, 3, 3)])
+def test_interleave_dataset_with_sharding(num_shards1, num_shards2, num_workers):
     from torch.utils.data import DataLoader
 
-    ex_iterable1 = ExamplesIterable(generate_examples_fn, {"filepaths": [f"{i}-1.txt" for i in range(n_shards1)]})
+    ex_iterable1 = ExamplesIterable(generate_examples_fn, {"filepaths": [f"{i}-1.txt" for i in range(num_shards1)]})
     dataset1 = IterableDataset(ex_iterable1).with_format("torch")
-    ex_iterable2 = ExamplesIterable(generate_examples_fn, {"filepaths": [f"{i}-2.txt" for i in range(n_shards2)]})
+    ex_iterable2 = ExamplesIterable(generate_examples_fn, {"filepaths": [f"{i}-2.txt" for i in range(num_shards2)]})
     dataset2 = IterableDataset(ex_iterable2).with_format("torch")
 
     dataset_merged = interleave_datasets([dataset1, dataset2], stopping_strategy="first_exhausted")
-    assert dataset_merged.n_shards == min(n_shards1, n_shards2)
+    assert dataset_merged.num_shards == min(num_shards1, num_shards2)
     dataloader = DataLoader(dataset_merged, batch_size=None, num_workers=num_workers)
     result = list(dataloader)
     expected_length = 2 * min(
@@ -2192,7 +2452,7 @@ def test_iterable_dataset_batch():
         assert len(batch["id"]) == 3
         assert len(batch["text"]) == 3
         assert batch["id"] == [3 * i, 3 * i + 1, 3 * i + 2]
-        assert batch["text"] == [f"Text {3*i}", f"Text {3*i+1}", f"Text {3*i+2}"]
+        assert batch["text"] == [f"Text {3 * i}", f"Text {3 * i + 1}", f"Text {3 * i + 2}"]
 
     # Check last partial batch
     assert len(batches[3]["id"]) == 1
@@ -2209,7 +2469,7 @@ def test_iterable_dataset_batch():
         assert len(batch["id"]) == 3
         assert len(batch["text"]) == 3
         assert batch["id"] == [3 * i, 3 * i + 1, 3 * i + 2]
-        assert batch["text"] == [f"Text {3*i}", f"Text {3*i+1}", f"Text {3*i+2}"]
+        assert batch["text"] == [f"Text {3 * i}", f"Text {3 * i + 1}", f"Text {3 * i + 2}"]
 
     # Test with batch_size=4 (doesn't evenly divide dataset size)
     batched_ds = ds.batch(batch_size=4, drop_last_batch=False)
@@ -2220,10 +2480,107 @@ def test_iterable_dataset_batch():
         assert len(batch["id"]) == 4
         assert len(batch["text"]) == 4
         assert batch["id"] == [4 * i, 4 * i + 1, 4 * i + 2, 4 * i + 3]
-        assert batch["text"] == [f"Text {4*i}", f"Text {4*i+1}", f"Text {4*i+2}", f"Text {4*i+3}"]
+        assert batch["text"] == [f"Text {4 * i}", f"Text {4 * i + 1}", f"Text {4 * i + 2}", f"Text {4 * i + 3}"]
 
     # Check last partial batch
     assert len(batches[2]["id"]) == 2
     assert len(batches[2]["text"]) == 2
     assert batches[2]["id"] == [8, 9]
     assert batches[2]["text"] == ["Text 8", "Text 9"]
+
+    # Test with features
+    batched_ds = ds._resolve_features().batch(batch_size=3)
+    batches = list(batched_ds)
+
+    assert batched_ds.features is not None
+    assert len(batches) == 4  # 3 full batches and 1 partial batch
+    for i, batch in enumerate(batches[:1]):
+        assert len(batch["id"]) == 3
+        assert len(batch["text"]) == 3
+        assert batch["id"] == [3 * i, 3 * i + 1, 3 * i + 2]
+        assert batch["text"] == [f"Text {3 * i}", f"Text {3 * i + 1}", f"Text {3 * i + 2}"]
+
+
+@dataclass
+class DecodableFeature:
+    decode_example_num_calls = 0
+
+    def __init__(self):
+        self.decode = True
+
+    def decode_example(self, example, token_per_repo_id=None):
+        type(self).decode_example_num_calls += 1
+        return "decoded" if self.decode else example
+
+    def __call__(self):
+        return pa.string()
+
+
+def test_decode():
+    data = [{"i": str(i)} for i in range(10)]
+    features = Features({"i": DecodableFeature()})
+    ds = IterableDataset.from_generator(lambda: (x for x in data), features=features)
+    assert next(iter(ds)) == {"i": "decoded"}
+    assert DecodableFeature.decode_example_num_calls == 1
+    ds = ds.decode(False)
+    assert next(iter(ds)) == {"i": "0"}
+    assert DecodableFeature.decode_example_num_calls == 1
+    ds = ds.decode(True)
+    assert next(iter(ds)) == {"i": "decoded"}
+    assert DecodableFeature.decode_example_num_calls == 2
+    ds = ds.decode(num_threads=1)
+    assert next(iter(ds)) == {"i": "decoded"}
+    assert DecodableFeature.decode_example_num_calls == 4
+
+
+############################
+#
+#   IterableColumn tests
+#
+############################
+
+
+class TestIterableColumn:
+    def test_simple_getitem(self):
+        def gen():
+            yield {"text": "Good", "label": 0}
+            yield {"text": "Bad", "label": 1}
+
+        ds = IterableDataset.from_generator(gen)
+        texts = ds["text"]
+        assert isinstance(texts, IterableColumn)
+
+        first_pass = list(texts)
+        assert first_pass == ["Good", "Bad"]
+        second_pass = list(texts)
+        assert second_pass == ["Good", "Bad"]
+
+    def test_chained_getitem(self):
+        def gen():
+            yield {"sample": {"text": "Good", "label": 0}}
+            yield {"sample": {"text": "Bad", "label": 1}}
+
+        ds = IterableDataset.from_generator(gen)
+        texts = ds["sample"]["text"]
+        assert isinstance(texts, IterableColumn)
+
+        first_pass = list(texts)
+        assert first_pass == ["Good", "Bad"]
+        second_pass = list(texts)
+        assert second_pass == ["Good", "Bad"]
+
+    def test_getitem_for_batched_dataset(self):
+        data = [
+            {"text": "Good", "label": 0},
+            {"text": "Bad", "label": 1},
+            {"text": "Good again", "label": 0},
+            {"text": "Bad again", "label": 1},
+        ]
+
+        def gen():
+            yield from data
+
+        ds = IterableDataset.from_generator(gen).batch(batch_size=2)
+        texts = ds["text"]
+        assert isinstance(texts, IterableColumn)
+        assert list(texts) == [["Good", "Bad"], ["Good again", "Bad again"]]

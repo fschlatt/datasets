@@ -20,7 +20,7 @@
 
 🤗 Datasets is a lightweight library providing **two** main features:
 
-- **one-line dataloaders for many public datasets**: one-liners to download and pre-process any of the ![number of datasets](https://img.shields.io/endpoint?url=https://huggingface.co/api/shields/datasets&color=brightgreen) major public datasets (image datasets, audio datasets, text datasets in 467 languages and dialects, etc.) provided on the [HuggingFace Datasets Hub](https://huggingface.co/datasets). With a simple command like `squad_dataset = load_dataset("squad")`, get any of these datasets ready to use in a dataloader for training/evaluating a ML model (Numpy/Pandas/PyTorch/TensorFlow/JAX),
+- **one-line dataloaders for many public datasets**: one-liners to download and pre-process any of the ![number of datasets](https://img.shields.io/endpoint?url=https://huggingface.co/api/shields/datasets&color=brightgreen) major public datasets (image datasets, audio datasets, text datasets in 467 languages and dialects, etc.) provided on the [HuggingFace Datasets Hub](https://huggingface.co/datasets). With a simple command like `squad_dataset = load_dataset("rajpurkar/squad")`, get any of these datasets ready to use in a dataloader for training/evaluating a ML model (Numpy/Pandas/PyTorch/TensorFlow/JAX),
 - **efficient data pre-processing**: simple, fast and reproducible data pre-processing for the public datasets as well as your own local datasets in CSV, JSON, text, PNG, JPEG, WAV, MP3, Parquet, etc. With simple commands like `processed_dataset = dataset.map(process_example)`, efficiently prepare the dataset for inspection and ML model evaluation and training.
 
 [🎓 **Documentation**](https://huggingface.co/docs/datasets/) [🔎 **Find a dataset in the Hub**](https://huggingface.co/datasets) [🌟 **Share a dataset on the Hub**](https://huggingface.co/docs/datasets/share)
@@ -36,11 +36,11 @@
 - Thrive on large datasets: 🤗 Datasets naturally frees the user from RAM memory limitation, all datasets are memory-mapped using an efficient zero-serialization cost backend (Apache Arrow).
 - Smart caching: never wait for your data to process several times.
 - Lightweight and fast with a transparent and pythonic API (multi-processing/caching/memory-mapping).
-- Built-in interoperability with NumPy, pandas, PyTorch, TensorFlow 2 and JAX.
-- Native support for audio and image data.
+- Built-in interoperability with NumPy, PyTorch, TensorFlow 2, JAX, Pandas, Polars and more.
+- Native support for audio, image and video data.
 - Enable streaming mode to save disk space and start iterating over the dataset immediately.
 
-🤗 Datasets originated from a fork of the awesome [TensorFlow Datasets](https://github.com/tensorflow/datasets) and the HuggingFace team want to deeply thank the TensorFlow Datasets team for building this amazing library. More details on the differences between 🤗 Datasets and `tfds` can be found in the section [Main differences between 🤗 Datasets and `tfds`](#main-differences-between--datasets-and-tfds).
+🤗 Datasets originated from a fork of the awesome [TensorFlow Datasets](https://github.com/tensorflow/datasets) and the HuggingFace team want to deeply thank the TensorFlow Datasets team for building this amazing library.
 
 # Installation
 
@@ -64,11 +64,12 @@ Follow the installation pages of TensorFlow and PyTorch to see how to install th
 
 For more details on installation, check the installation page in the documentation: https://huggingface.co/docs/datasets/installation
 
-## Installation to use with PyTorch/TensorFlow/pandas
+## Installation to use with Machine Learning & Data frameworks frameworks
 
-If you plan to use 🤗 Datasets with PyTorch (1.0+), TensorFlow (2.2+) or pandas, you should also install PyTorch, TensorFlow or pandas.
+If you plan to use 🤗 Datasets with PyTorch (2.0+), TensorFlow (2.6+) or JAX (3.14+) you should also install PyTorch, TensorFlow or JAX.
+🤗 Datasets is also well integrated with data frameworks like PyArrow, Pandas, Polars and Spark, which should be installed separately.
 
-For more details on using the library with NumPy, pandas, PyTorch or TensorFlow, check the quick start page in the documentation: https://huggingface.co/docs/datasets/quickstart
+For more details on using the library with these frameworks, check the quick start page in the documentation: https://huggingface.co/docs/datasets/quickstart
 
 # Usage
 
@@ -86,7 +87,7 @@ from huggingface_hub import list_datasets
 print([dataset.id for dataset in list_datasets()])
 
 # Load a dataset and print the first example in the training set
-squad_dataset = load_dataset('squad')
+squad_dataset = load_dataset('rajpurkar/squad')
 print(squad_dataset['train'][0])
 
 # Process the dataset - add a column with the length of the context texts
@@ -103,7 +104,7 @@ If your dataset is bigger than your disk or if you don't want to wait to downloa
 
 ```python
 # If you want to use the dataset immediately and efficiently stream the data as you iterate over the dataset
-image_dataset = load_dataset('cifar100', streaming=True)
+image_dataset = load_dataset('timm/imagenet-1k-wds', streaming=True)
 for example in image_dataset["train"]:
     break
 ```
@@ -117,7 +118,6 @@ For more details on using the library, check the quick start page in the documen
     - Processing image data: https://huggingface.co/docs/datasets/image_process
     - Processing text data: https://huggingface.co/docs/datasets/nlp_process
 - Streaming a dataset: https://huggingface.co/docs/datasets/stream
-- Writing your own dataset loading script: https://huggingface.co/docs/datasets/dataset_script
 - etc.
 
 # Add a new dataset to the Hub
@@ -128,19 +128,9 @@ You can find:
 - [how to upload a dataset to the Hub using your web browser or Python](https://huggingface.co/docs/datasets/upload_dataset) and also
 - [how to upload it using Git](https://huggingface.co/docs/datasets/share).
 
-# Main differences between 🤗 Datasets and `tfds`
-
-If you are familiar with the great TensorFlow Datasets, here are the main differences between 🤗 Datasets and `tfds`:
-
-- the scripts in 🤗 Datasets are not provided within the library but are queried, downloaded/cached and dynamically loaded upon request
-- the backend serialization of 🤗 Datasets is based on [Apache Arrow](https://arrow.apache.org/) instead of TF Records and leverage python dataclasses for info and features with some diverging features (we mostly don't do encoding and store the raw data as much as possible in the backend serialization cache).
-- the user-facing dataset object of 🤗 Datasets is not a `tf.data.Dataset` but a built-in framework-agnostic dataset class with methods inspired by what we like in `tf.data` (like a `map()` method). It basically wraps a memory-mapped Arrow table cache.
-
 # Disclaimers
 
-🤗 Datasets may run Python code defined by the dataset authors to parse certain data formats or structures. For security reasons, we ask users to:
-- check the dataset scripts they're going to run beforehand and
-- pin the `revision` of the repositories they use.
+You can use 🤗 Datasets to load datasets based on versioned git repositories maintained by the dataset authors. For reproducibility reasons, we ask users to pin the `revision` of the repositories they use.
 
 If you're a dataset owner and wish to update any part of it (description, citation, license, etc.), or do not want your dataset to be included in the Hugging Face Hub, please get in touch by opening a discussion or a pull request in the Community tab of the dataset page. Thanks for your contribution to the ML community!
 

@@ -5,9 +5,10 @@ import json
 import math
 import posixpath
 import re
-from io import BytesIO
+from collections.abc import Sequence
+from functools import partial
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Sequence, Tuple, Union
+from typing import Callable, Optional, Union
 
 import fsspec
 import numpy as np
@@ -23,10 +24,14 @@ from huggingface_hub import (
 from huggingface_hub.hf_api import RepoFile
 
 from . import config
-from .arrow_dataset import PUSH_TO_HUB_WITHOUT_METADATA_CONFIGS_SPLIT_PATTERN_SHARDED, Dataset
+from .arrow_dataset import (
+    PUSH_TO_HUB_WITHOUT_METADATA_CONFIGS_SPLIT_PATTERN_SHARDED,
+    Dataset,
+)
 from .features import Features
 from .features.features import FeatureType
 from .info import DatasetInfo, DatasetInfosDict
+from .iterable_dataset import IterableDataset
 from .naming import _split_re
 from .splits import NamedSplit, Split, SplitDict, SplitInfo
 from .table import Table
@@ -40,7 +45,12 @@ from .utils.typing import PathLike
 logger = logging.get_logger(__name__)
 
 
-class DatasetDict(dict):
+class bind(partial):
+    def __call__(self, *fn_args, **fn_kwargs):
+        return self.func(*fn_args, *self.args, **fn_kwargs)
+
+
+class DatasetDict(dict[Union[str, NamedSplit], "Dataset"]):
     """A dictionary (dict of str: datasets.Dataset) with dataset transforms methods (map, filter, etc.)"""
 
     def _check_values_type(self):
@@ -82,14 +92,14 @@ class DatasetDict(dict):
             )
 
     @property
-    def data(self) -> Dict[str, Table]:
+    def data(self) -> dict[str, Table]:
         """The Apache Arrow tables backing each split.
 
         Example:
 
         ```py
         >>> from datasets import load_dataset
-        >>> ds = load_dataset("rotten_tomatoes")
+        >>> ds = load_dataset("cornell-movie-review-data/rotten_tomatoes")
         >>> ds.data
         ```
         """
@@ -97,14 +107,14 @@ class DatasetDict(dict):
         return {k: dataset.data for k, dataset in self.items()}
 
     @property
-    def cache_files(self) -> Dict[str, Dict]:
+    def cache_files(self) -> dict[str, dict]:
         """The cache files containing the Apache Arrow table backing each split.
 
         Example:
 
         ```py
         >>> from datasets import load_dataset
-        >>> ds = load_dataset("rotten_tomatoes")
+        >>> ds = load_dataset("cornell-movie-review-data/rotten_tomatoes")
         >>> ds.cache_files
         {'test': [{'filename': '/root/.cache/huggingface/datasets/rotten_tomatoes_movie_review/default/1.0.0/40d411e45a6ce3484deed7cc15b82a53dad9a72aafd9f86f8f227134bec5ca46/rotten_tomatoes_movie_review-test.arrow'}],
          'train': [{'filename': '/root/.cache/huggingface/datasets/rotten_tomatoes_movie_review/default/1.0.0/40d411e45a6ce3484deed7cc15b82a53dad9a72aafd9f86f8f227134bec5ca46/rotten_tomatoes_movie_review-train.arrow'}],
@@ -115,14 +125,14 @@ class DatasetDict(dict):
         return {k: dataset.cache_files for k, dataset in self.items()}
 
     @property
-    def num_columns(self) -> Dict[str, int]:
+    def num_columns(self) -> dict[str, int]:
         """Number of columns in each split of the dataset.
 
         Example:
 
         ```py
         >>> from datasets import load_dataset
-        >>> ds = load_dataset("rotten_tomatoes")
+        >>> ds = load_dataset("cornell-movie-review-data/rotten_tomatoes")
         >>> ds.num_columns
         {'test': 2, 'train': 2, 'validation': 2}
         ```
@@ -131,14 +141,14 @@ class DatasetDict(dict):
         return {k: dataset.num_columns for k, dataset in self.items()}
 
     @property
-    def num_rows(self) -> Dict[str, int]:
+    def num_rows(self) -> dict[str, int]:
         """Number of rows in each split of the dataset.
 
         Example:
 
         ```py
         >>> from datasets import load_dataset
-        >>> ds = load_dataset("rotten_tomatoes")
+        >>> ds = load_dataset("cornell-movie-review-data/rotten_tomatoes")
         >>> ds.num_rows
         {'test': 1066, 'train': 8530, 'validation': 1066}
         ```
@@ -147,14 +157,14 @@ class DatasetDict(dict):
         return {k: dataset.num_rows for k, dataset in self.items()}
 
     @property
-    def column_names(self) -> Dict[str, List[str]]:
+    def column_names(self) -> dict[str, list[str]]:
         """Names of the columns in each split of the dataset.
 
         Example:
 
         ```py
         >>> from datasets import load_dataset
-        >>> ds = load_dataset("rotten_tomatoes")
+        >>> ds = load_dataset("cornell-movie-review-data/rotten_tomatoes")
         >>> ds.column_names
         {'test': ['text', 'label'],
          'train': ['text', 'label'],
@@ -165,14 +175,14 @@ class DatasetDict(dict):
         return {k: dataset.column_names for k, dataset in self.items()}
 
     @property
-    def shape(self) -> Dict[str, Tuple[int]]:
+    def shape(self) -> dict[str, tuple[int]]:
         """Shape of each split of the dataset (number of rows, number of columns).
 
         Example:
 
         ```py
         >>> from datasets import load_dataset
-        >>> ds = load_dataset("rotten_tomatoes")
+        >>> ds = load_dataset("cornell-movie-review-data/rotten_tomatoes")
         >>> ds.shape
         {'test': (1066, 2), 'train': (8530, 2), 'validation': (1066, 2)}
         ```
@@ -189,7 +199,7 @@ class DatasetDict(dict):
 
         ```py
         >>> from datasets import load_dataset
-        >>> ds = load_dataset("squad")
+        >>> ds = load_dataset("rajpurkar/squad")
         >>> ds["train"].features
         {'answers': Sequence(feature={'text': Value(dtype='string', id=None), 'answer_start': Value(dtype='int32', id=None)}, length=-1, id=None),
          'context': Value(dtype='string', id=None),
@@ -212,7 +222,7 @@ class DatasetDict(dict):
         self._check_values_type()
         return DatasetDict({k: dataset.flatten(max_depth=max_depth) for k, dataset in self.items()})
 
-    def unique(self, column: str) -> Dict[str, List]:
+    def unique(self, column: str) -> dict[str, list]:
         """Return a list of the unique elements in a column for each split.
 
         This is implemented in the low-level backend and as such, very fast.
@@ -228,7 +238,7 @@ class DatasetDict(dict):
 
         ```py
         >>> from datasets import load_dataset
-        >>> ds = load_dataset("rotten_tomatoes")
+        >>> ds = load_dataset("cornell-movie-review-data/rotten_tomatoes")
         >>> ds.unique("label")
         {'test': [1, 0], 'train': [1, 0], 'validation': [1, 0]}
         ```
@@ -236,7 +246,7 @@ class DatasetDict(dict):
         self._check_values_type()
         return {k: dataset.unique(column) for k, dataset in self.items()}
 
-    def cleanup_cache_files(self) -> Dict[str, int]:
+    def cleanup_cache_files(self) -> dict[str, int]:
         """Clean up all cache files in the dataset cache directory, excepted the currently used cache file if there is one.
         Be careful when running this command that no other process is currently using other cache files.
 
@@ -247,7 +257,7 @@ class DatasetDict(dict):
 
         ```py
         >>> from datasets import load_dataset
-        >>> ds = load_dataset("rotten_tomatoes")
+        >>> ds = load_dataset("cornell-movie-review-data/rotten_tomatoes")
         >>> ds.cleanup_cache_files()
         {'test': 0, 'train': 0, 'validation': 0}
         ```
@@ -257,7 +267,7 @@ class DatasetDict(dict):
 
     def __repr__(self):
         repr = "\n".join([f"{k}: {v}" for k, v in self.items()])
-        repr = re.sub(r"^", " " * 4, repr, 0, re.M)
+        repr = re.sub(r"^", " " * 4, repr, count=0, flags=re.M)
         return f"DatasetDict({{\n{repr}\n}})"
 
     def cast(self, features: Features) -> "DatasetDict":
@@ -275,17 +285,17 @@ class DatasetDict(dict):
         Example:
 
         ```py
-        >>> from datasets import load_dataset
-        >>> ds = load_dataset("rotten_tomatoes")
+        >>> from datasets import load_dataset, ClassLabel, Value
+        >>> ds = load_dataset("cornell-movie-review-data/rotten_tomatoes")
         >>> ds["train"].features
-        {'label': ClassLabel(num_classes=2, names=['neg', 'pos'], id=None),
+        {'label': ClassLabel(names=['neg', 'pos'], id=None),
          'text': Value(dtype='string', id=None)}
         >>> new_features = ds["train"].features.copy()
         >>> new_features['label'] = ClassLabel(names=['bad', 'good'])
         >>> new_features['text'] = Value('large_string')
         >>> ds = ds.cast(new_features)
         >>> ds["train"].features
-        {'label': ClassLabel(num_classes=2, names=['bad', 'good'], id=None),
+        {'label': ClassLabel(names=['bad', 'good'], id=None),
          'text': Value(dtype='large_string', id=None)}
         ```
         """
@@ -307,21 +317,21 @@ class DatasetDict(dict):
         Example:
 
         ```py
-        >>> from datasets import load_dataset
-        >>> ds = load_dataset("rotten_tomatoes")
+        >>> from datasets import load_dataset, ClassLabel
+        >>> ds = load_dataset("cornell-movie-review-data/rotten_tomatoes")
         >>> ds["train"].features
-        {'label': ClassLabel(num_classes=2, names=['neg', 'pos'], id=None),
+        {'label': ClassLabel(names=['neg', 'pos'], id=None),
          'text': Value(dtype='string', id=None)}
         >>> ds = ds.cast_column('label', ClassLabel(names=['bad', 'good']))
         >>> ds["train"].features
-        {'label': ClassLabel(num_classes=2, names=['bad', 'good'], id=None),
+        {'label': ClassLabel(names=['bad', 'good'], id=None),
          'text': Value(dtype='string', id=None)}
         ```
         """
         self._check_values_type()
         return DatasetDict({k: dataset.cast_column(column=column, feature=feature) for k, dataset in self.items()})
 
-    def remove_columns(self, column_names: Union[str, List[str]]) -> "DatasetDict":
+    def remove_columns(self, column_names: Union[str, list[str]]) -> "DatasetDict":
         """
         Remove one or several column(s) from each split in the dataset
         and the features associated to the column(s).
@@ -332,7 +342,7 @@ class DatasetDict(dict):
         doesn't copy the data of the remaining columns and is thus faster.
 
         Args:
-            column_names (`Union[str, List[str]]`):
+            column_names (`Union[str, list[str]]`):
                 Name of the column(s) to remove.
 
         Returns:
@@ -342,7 +352,7 @@ class DatasetDict(dict):
 
         ```py
         >>> from datasets import load_dataset
-        >>> ds = load_dataset("rotten_tomatoes")
+        >>> ds = load_dataset("cornell-movie-review-data/rotten_tomatoes")
         >>> ds = ds.remove_columns("label")
         DatasetDict({
             train: Dataset({
@@ -382,7 +392,7 @@ class DatasetDict(dict):
 
         ```py
         >>> from datasets import load_dataset
-        >>> ds = load_dataset("rotten_tomatoes")
+        >>> ds = load_dataset("cornell-movie-review-data/rotten_tomatoes")
         >>> ds = ds.rename_column("label", "label_new")
         DatasetDict({
             train: Dataset({
@@ -403,12 +413,15 @@ class DatasetDict(dict):
         self._check_values_type()
         return DatasetDict(
             {
-                k: dataset.rename_column(original_column_name=original_column_name, new_column_name=new_column_name)
+                k: dataset.rename_column(
+                    original_column_name=original_column_name,
+                    new_column_name=new_column_name,
+                )
                 for k, dataset in self.items()
             }
         )
 
-    def rename_columns(self, column_mapping: Dict[str, str]) -> "DatasetDict":
+    def rename_columns(self, column_mapping: dict[str, str]) -> "DatasetDict":
         """
         Rename several columns in the dataset, and move the features associated to the original columns under
         the new column names.
@@ -425,7 +438,7 @@ class DatasetDict(dict):
 
         ```py
         >>> from datasets import load_dataset
-        >>> ds = load_dataset("rotten_tomatoes")
+        >>> ds = load_dataset("cornell-movie-review-data/rotten_tomatoes")
         >>> ds.rename_columns({'text': 'text_new', 'label': 'label_new'})
         DatasetDict({
             train: Dataset({
@@ -446,7 +459,7 @@ class DatasetDict(dict):
         self._check_values_type()
         return DatasetDict({k: dataset.rename_columns(column_mapping=column_mapping) for k, dataset in self.items()})
 
-    def select_columns(self, column_names: Union[str, List[str]]) -> "DatasetDict":
+    def select_columns(self, column_names: Union[str, list[str]]) -> "DatasetDict":
         """Select one or several column(s) from each split in the dataset and
         the features associated to the column(s).
 
@@ -454,14 +467,14 @@ class DatasetDict(dict):
         dictionary.
 
         Args:
-            column_names (`Union[str, List[str]]`):
+            column_names (`Union[str, list[str]]`):
                 Name of the column(s) to keep.
 
         Example:
 
         ```py
         >>> from datasets import load_dataset
-        >>> ds = load_dataset("rotten_tomatoes")
+        >>> ds = load_dataset("cornell-movie-review-data/rotten_tomatoes")
         >>> ds.select_columns("text")
         DatasetDict({
             train: Dataset({
@@ -518,7 +531,7 @@ class DatasetDict(dict):
     def formatted_as(
         self,
         type: Optional[str] = None,
-        columns: Optional[List] = None,
+        columns: Optional[list] = None,
         output_all_columns: bool = False,
         **format_kwargs,
     ):
@@ -527,9 +540,9 @@ class DatasetDict(dict):
 
         Args:
             type (`str`, *optional*):
-                Output type selected in `[None, 'numpy', 'torch', 'tensorflow', 'pandas', 'arrow', 'jax']`.
+                Either output type selected in `[None, 'numpy', 'torch', 'tensorflow', 'jax', 'arrow', 'pandas', 'polars']`.
                 `None` means `__getitem__` returns python objects (default).
-            columns (`List[str]`, *optional*):
+            columns (`list[str]`, *optional*):
                 Columns to format in the output.
                 `None` means `__getitem__` returns all columns (default).
             output_all_columns (`bool`, defaults to False):
@@ -548,13 +561,16 @@ class DatasetDict(dict):
         finally:
             for k, dataset in self.items():
                 dataset.set_format(
-                    old_format_type[k], old_format_columns[k], old_output_all_columns[k], **old_format_kwargs[k]
+                    old_format_type[k],
+                    old_format_columns[k],
+                    old_output_all_columns[k],
+                    **old_format_kwargs[k],
                 )
 
     def set_format(
         self,
         type: Optional[str] = None,
-        columns: Optional[List] = None,
+        columns: Optional[list] = None,
         output_all_columns: bool = False,
         **format_kwargs,
     ):
@@ -563,9 +579,9 @@ class DatasetDict(dict):
 
         Args:
             type (`str`, *optional*):
-                Output type selected in `[None, 'numpy', 'torch', 'tensorflow', 'pandas', 'arrow', 'jax']`.
+                Either output type selected in `[None, 'numpy', 'torch', 'tensorflow', 'jax', 'arrow', 'pandas', 'polars']`.
                 `None` means `__getitem__` returns python objects (default).
-            columns (`List[str]`, *optional*):
+            columns (`list[str]`, *optional*):
                 Columns to format in the output.
                 `None` means `__getitem__` returns all columns (default).
             output_all_columns (`bool`, defaults to False):
@@ -595,7 +611,12 @@ class DatasetDict(dict):
         """
         self._check_values_type()
         for dataset in self.values():
-            dataset.set_format(type=type, columns=columns, output_all_columns=output_all_columns, **format_kwargs)
+            dataset.set_format(
+                type=type,
+                columns=columns,
+                output_all_columns=output_all_columns,
+                **format_kwargs,
+            )
 
     def reset_format(self):
         """Reset `__getitem__` return format to python objects and all columns.
@@ -608,7 +629,7 @@ class DatasetDict(dict):
         ```py
         >>> from datasets import load_dataset
         >>> from transformers import AutoTokenizer
-        >>> ds = load_dataset("rotten_tomatoes")
+        >>> ds = load_dataset("cornell-movie-review-data/rotten_tomatoes")
         >>> tokenizer = AutoTokenizer.from_pretrained("bert-base-cased")
         >>> ds = ds.map(lambda x: tokenizer(x["text"], truncation=True, padding=True), batched=True)
         >>> ds.set_format(type="numpy", columns=['input_ids', 'token_type_ids', 'attention_mask', 'label'])
@@ -632,7 +653,7 @@ class DatasetDict(dict):
     def set_transform(
         self,
         transform: Optional[Callable],
-        columns: Optional[List] = None,
+        columns: Optional[list] = None,
         output_all_columns: bool = False,
     ):
         """Set ``__getitem__`` return format using this transform. The transform is applied on-the-fly on batches when ``__getitem__`` is called.
@@ -643,7 +664,7 @@ class DatasetDict(dict):
             transform (`Callable`, optional): user-defined formatting transform, replaces the format defined by :func:`datasets.Dataset.set_format`
                 A formatting function is a callable that takes a batch (as a dict) as input and returns a batch.
                 This function is applied right before returning the objects in ``__getitem__``.
-            columns (`List[str]`, optional): columns to format in the output
+            columns (`list[str]`, optional): columns to format in the output
                 If specified, then the input batch of the transform only contains those columns.
             output_all_columns (`bool`, default to False): keep un-formatted columns as well in the output (as python objects)
                 If set to True, then the other un-formatted columns are kept with the output of the transform.
@@ -651,12 +672,17 @@ class DatasetDict(dict):
         """
         self._check_values_type()
         for dataset in self.values():
-            dataset.set_format("custom", columns=columns, output_all_columns=output_all_columns, transform=transform)
+            dataset.set_format(
+                "custom",
+                columns=columns,
+                output_all_columns=output_all_columns,
+                transform=transform,
+            )
 
     def with_format(
         self,
         type: Optional[str] = None,
-        columns: Optional[List] = None,
+        columns: Optional[list] = None,
         output_all_columns: bool = False,
         **format_kwargs,
     ) -> "DatasetDict":
@@ -670,9 +696,9 @@ class DatasetDict(dict):
 
         Args:
             type (`str`, *optional*):
-                Output type selected in `[None, 'numpy', 'torch', 'tensorflow', 'pandas', 'arrow', 'jax']`.
+                Either output type selected in `[None, 'numpy', 'torch', 'tensorflow', 'jax', 'arrow', 'pandas', 'polars']`.
                 `None` means `__getitem__` returns python objects (default).
-            columns (`List[str]`, *optional*):
+            columns (`list[str]`, *optional*):
                 Columns to format in the output.
                 `None` means `__getitem__` returns all columns (default).
             output_all_columns (`bool`, defaults to `False`):
@@ -685,7 +711,7 @@ class DatasetDict(dict):
         ```py
         >>> from datasets import load_dataset
         >>> from transformers import AutoTokenizer
-        >>> ds = load_dataset("rotten_tomatoes")
+        >>> ds = load_dataset("cornell-movie-review-data/rotten_tomatoes")
         >>> tokenizer = AutoTokenizer.from_pretrained("bert-base-cased")
         >>> ds = ds.map(lambda x: tokenizer(x['text'], truncation=True, padding=True), batched=True)
         >>> ds["train"].format
@@ -693,22 +719,47 @@ class DatasetDict(dict):
          'format_kwargs': {},
          'output_all_columns': False,
          'type': None}
-        >>> ds = ds.with_format(type='tensorflow', columns=['input_ids', 'token_type_ids', 'attention_mask', 'label'])
+        >>> ds = ds.with_format("torch")
         >>> ds["train"].format
-        {'columns': ['input_ids', 'token_type_ids', 'attention_mask', 'label'],
+        {'columns': ['text', 'label', 'input_ids', 'token_type_ids', 'attention_mask'],
          'format_kwargs': {},
          'output_all_columns': False,
-         'type': 'tensorflow'}
+         'type': 'torch'}
+        >>> ds["train"][0]
+        {'text': 'compassionately explores the seemingly irreconcilable situation between conservative christian parents and their estranged gay and lesbian children .',
+         'label': tensor(1),
+         'input_ids': tensor([  101, 18027, 16310, 16001,  1103,  9321,   178, 11604,  7235,  6617,
+                1742,  2165,  2820,  1206,  6588, 22572, 12937,  1811,  2153,  1105,
+                1147, 12890, 19587,  6463,  1105, 15026,  1482,   119,   102,     0,
+                    0,     0,     0,     0,     0,     0,     0,     0,     0,     0,
+                    0,     0,     0,     0,     0,     0,     0,     0,     0,     0,
+                    0,     0,     0,     0,     0,     0,     0,     0,     0,     0,
+                    0,     0,     0,     0,     0,     0,     0,     0,     0,     0,
+                    0,     0,     0,     0,     0,     0,     0,     0,     0,     0,
+                    0,     0,     0,     0]),
+         'token_type_ids': tensor([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+         'attention_mask': tensor([1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+                1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])}
         ```
         """
         dataset = copy.deepcopy(self)
-        dataset.set_format(type=type, columns=columns, output_all_columns=output_all_columns, **format_kwargs)
+        dataset.set_format(
+            type=type,
+            columns=columns,
+            output_all_columns=output_all_columns,
+            **format_kwargs,
+        )
         return dataset
 
     def with_transform(
         self,
         transform: Optional[Callable],
-        columns: Optional[List] = None,
+        columns: Optional[list] = None,
         output_all_columns: bool = False,
     ) -> "DatasetDict":
         """Set `__getitem__` return format using this transform. The transform is applied on-the-fly on batches when `__getitem__` is called.
@@ -723,7 +774,7 @@ class DatasetDict(dict):
                 User-defined formatting transform, replaces the format defined by [`~datasets.Dataset.set_format`].
                 A formatting function is a callable that takes a batch (as a dict) as input and returns a batch.
                 This function is applied right before returning the objects in `__getitem__`.
-            columns (`List[str]`, *optional*):
+            columns (`list[str]`, *optional*):
                 Columns to format in the output.
                 If specified, then the input batch of the transform only contains those columns.
             output_all_columns (`bool`, defaults to False):
@@ -735,7 +786,7 @@ class DatasetDict(dict):
         ```py
         >>> from datasets import load_dataset
         >>> from transformers import AutoTokenizer
-        >>> ds = load_dataset("rotten_tomatoes")
+        >>> ds = load_dataset("cornell-movie-review-data/rotten_tomatoes")
         >>> tokenizer = AutoTokenizer.from_pretrained("bert-base-cased")
         >>> def encode(example):
         ...     return tokenizer(example['text'], truncation=True, padding=True, return_tensors="pt")
@@ -764,41 +815,61 @@ class DatasetDict(dict):
         function: Optional[Callable] = None,
         with_indices: bool = False,
         with_rank: bool = False,
-        input_columns: Optional[Union[str, List[str]]] = None,
+        with_split: bool = False,
+        input_columns: Optional[Union[str, list[str]]] = None,
         batched: bool = False,
         batch_size: Optional[int] = 1000,
         drop_last_batch: bool = False,
-        remove_columns: Optional[Union[str, List[str]]] = None,
+        remove_columns: Optional[Union[str, list[str]]] = None,
         keep_in_memory: bool = False,
         load_from_cache_file: Optional[bool] = None,
-        cache_file_names: Optional[Dict[str, Optional[str]]] = None,
+        cache_file_names: Optional[dict[str, Optional[str]]] = None,
         writer_batch_size: Optional[int] = 1000,
         features: Optional[Features] = None,
         disable_nullable: bool = False,
         fn_kwargs: Optional[dict] = None,
         num_proc: Optional[int] = None,
         desc: Optional[str] = None,
+        try_original_type: Optional[bool] = True,
     ) -> "DatasetDict":
-        """Apply a function to all the elements in the table (individually or in batches)
-        and update the table (if function does updated examples).
+        """
+        Apply a function to all the examples in the table (individually or in batches) and update the table.
+        If your function returns a column that already exists, then it overwrites it.
         The transformation is applied to all the datasets of the dataset dictionary.
+
+        You can specify whether the function should be batched or not with the `batched` parameter:
+
+        - If batched is `False`, then the function takes 1 example in and should return 1 example.
+          An example is a dictionary, e.g. `{"text": "Hello there !"}`.
+        - If batched is `True` and `batch_size` is 1, then the function takes a batch of 1 example as input and can return a batch with 1 or more examples.
+          A batch is a dictionary, e.g. a batch of 1 example is `{"text": ["Hello there !"]}`.
+        - If batched is `True` and `batch_size` is `n > 1`, then the function takes a batch of `n` examples as input and can return a batch with `n` examples, or with an arbitrary number of examples.
+          Note that the last batch may have less than `n` examples.
+          A batch is a dictionary, e.g. a batch of `n` examples is `{"text": ["Hello there !"] * n}`.
+
+        If the function is asynchronous, then `map` will run your function in parallel, with up to one thousand simultaneous calls.
+        It is recommended to use a `asyncio.Semaphore` in your function if you want to set a maximum number of operations that can run at the same time.
 
         Args:
             function (`callable`): with one of the following signature:
                 - `function(example: Dict[str, Any]) -> Dict[str, Any]` if `batched=False` and `with_indices=False`
                 - `function(example: Dict[str, Any], indices: int) -> Dict[str, Any]` if `batched=False` and `with_indices=True`
-                - `function(batch: Dict[str, List]) -> Dict[str, List]` if `batched=True` and `with_indices=False`
-                - `function(batch: Dict[str, List], indices: List[int]) -> Dict[str, List]` if `batched=True` and `with_indices=True`
+                - `function(batch: Dict[str, list]) -> Dict[str, list]` if `batched=True` and `with_indices=False`
+                - `function(batch: Dict[str, list], indices: list[int]) -> Dict[str, list]` if `batched=True` and `with_indices=True`
 
                 For advanced usage, the function can also return a `pyarrow.Table`.
+                If the function is asynchronous, then `map` will run your function in parallel.
                 Moreover if your function returns nothing (`None`), then `map` will run your function and return the dataset unchanged.
-
+                If no function is provided, default to identity function: `lambda x: x`.
             with_indices (`bool`, defaults to `False`):
                 Provide example indices to `function`. Note that in this case the signature of `function` should be `def function(example, idx): ...`.
             with_rank (`bool`, defaults to `False`):
                 Provide process rank to `function`. Note that in this case the
                 signature of `function` should be `def function(example[, idx], rank): ...`.
-            input_columns (`[Union[str, List[str]]]`, *optional*, defaults to `None`):
+            with_split (`bool`, defaults to `False`):
+                Provide process split to `function`. Note that in this case the
+                signature of `function` should be `def function(example[, idx], split): ...`.
+            input_columns (`[Union[str, list[str]]]`, *optional*, defaults to `None`):
                 The columns to be passed into `function` as
                 positional arguments. If `None`, a dict mapping to all formatted columns is passed as one argument.
             batched (`bool`, defaults to `False`):
@@ -809,7 +880,7 @@ class DatasetDict(dict):
             drop_last_batch (`bool`, defaults to `False`):
                 Whether a last batch smaller than the batch_size should be
                 dropped instead of being processed by the function.
-            remove_columns (`[Union[str, List[str]]]`, *optional*, defaults to `None`):
+            remove_columns (`[Union[str, list[str]]]`, *optional*, defaults to `None`):
                 Remove a selection of columns while doing the mapping.
                 Columns will be removed before updating the examples with the output of `function`, i.e. if `function` is adding
                 columns with names in `remove_columns`, these columns will be kept.
@@ -838,12 +909,15 @@ class DatasetDict(dict):
                 use multiprocessing.
             desc (`str`, *optional*, defaults to `None`):
                 Meaningful description to be displayed alongside with the progress bar while mapping examples.
+            try_original_type (`Optional[bool]`, defaults to `True`):
+                Try to keep the types of the original columns (e.g. int32 -> int32).
+                Set to False if you want to always infer new types.
 
         Example:
 
         ```py
         >>> from datasets import load_dataset
-        >>> ds = load_dataset("rotten_tomatoes")
+        >>> ds = load_dataset("cornell-movie-review-data/rotten_tomatoes")
         >>> def add_prefix(example):
         ...     example["text"] = "Review: " + example["text"]
         ...     return example
@@ -861,43 +935,50 @@ class DatasetDict(dict):
         """
         self._check_values_type()
         if cache_file_names is None:
-            cache_file_names = {k: None for k in self}
-        return DatasetDict(
-            {
-                k: dataset.map(
-                    function=function,
-                    with_indices=with_indices,
-                    with_rank=with_rank,
-                    input_columns=input_columns,
-                    batched=batched,
-                    batch_size=batch_size,
-                    drop_last_batch=drop_last_batch,
-                    remove_columns=remove_columns,
-                    keep_in_memory=keep_in_memory,
-                    load_from_cache_file=load_from_cache_file,
-                    cache_file_name=cache_file_names[k],
-                    writer_batch_size=writer_batch_size,
-                    features=features,
-                    disable_nullable=disable_nullable,
-                    fn_kwargs=fn_kwargs,
-                    num_proc=num_proc,
-                    desc=desc,
-                )
-                for k, dataset in self.items()
-            }
-        )
+            cache_file_names = dict.fromkeys(self)
+
+        dataset_dict = {}
+        for split, dataset in self.items():
+            if with_split:
+                function = bind(function, split)
+
+            dataset_dict[split] = dataset.map(
+                function=function,
+                with_indices=with_indices,
+                with_rank=with_rank,
+                input_columns=input_columns,
+                batched=batched,
+                batch_size=batch_size,
+                drop_last_batch=drop_last_batch,
+                remove_columns=remove_columns,
+                keep_in_memory=keep_in_memory,
+                load_from_cache_file=load_from_cache_file,
+                cache_file_name=cache_file_names[split],
+                writer_batch_size=writer_batch_size,
+                features=features,
+                disable_nullable=disable_nullable,
+                fn_kwargs=fn_kwargs,
+                num_proc=num_proc,
+                desc=desc,
+                try_original_type=try_original_type,
+            )
+
+            if with_split:
+                function = function.func
+
+        return DatasetDict(dataset_dict)
 
     def filter(
         self,
         function: Optional[Callable] = None,
         with_indices: bool = False,
         with_rank: bool = False,
-        input_columns: Optional[Union[str, List[str]]] = None,
+        input_columns: Optional[Union[str, list[str]]] = None,
         batched: bool = False,
         batch_size: Optional[int] = 1000,
         keep_in_memory: bool = False,
         load_from_cache_file: Optional[bool] = None,
-        cache_file_names: Optional[Dict[str, Optional[str]]] = None,
+        cache_file_names: Optional[dict[str, Optional[str]]] = None,
         writer_batch_size: Optional[int] = 1000,
         fn_kwargs: Optional[dict] = None,
         num_proc: Optional[int] = None,
@@ -912,8 +993,8 @@ class DatasetDict(dict):
 
                 - `function(example: Dict[str, Any]) -> bool` if `batched=False` and `with_indices=False` and `with_rank=False`
                 - `function(example: Dict[str, Any], *extra_args) -> bool` if `batched=False` and `with_indices=True` and/or `with_rank=True` (one extra arg for each)
-                - `function(batch: Dict[str, List]) -> List[bool]` if `batched=True` and `with_indices=False` and `with_rank=False`
-                - `function(batch: Dict[str, List], *extra_args) -> List[bool]` if `batched=True` and `with_indices=True` and/or `with_rank=True` (one extra arg for each)
+                - `function(batch: Dict[str, list]) -> list[bool]` if `batched=True` and `with_indices=False` and `with_rank=False`
+                - `function(batch: Dict[str, list], *extra_args) -> list[bool]` if `batched=True` and `with_indices=True` and/or `with_rank=True` (one extra arg for each)
 
                 If no function is provided, defaults to an always `True` function: `lambda x: True`.
             with_indices (`bool`, defaults to `False`):
@@ -922,7 +1003,7 @@ class DatasetDict(dict):
             with_rank (`bool`, defaults to `False`):
                 Provide process rank to `function`. Note that in this case the
                 signature of `function` should be `def function(example[, idx], rank): ...`.
-            input_columns (`[Union[str, List[str]]]`, *optional*, defaults to `None`):
+            input_columns (`[Union[str, list[str]]]`, *optional*, defaults to `None`):
                 The columns to be passed into `function` as
                 positional arguments. If `None`, a dict mapping to all formatted columns is passed as one argument.
             batched (`bool`, defaults to `False`):
@@ -955,7 +1036,7 @@ class DatasetDict(dict):
 
         ```py
         >>> from datasets import load_dataset
-        >>> ds = load_dataset("rotten_tomatoes")
+        >>> ds = load_dataset("cornell-movie-review-data/rotten_tomatoes")
         >>> ds.filter(lambda x: x["label"] == 1)
         DatasetDict({
             train: Dataset({
@@ -975,7 +1056,7 @@ class DatasetDict(dict):
         """
         self._check_values_type()
         if cache_file_names is None:
-            cache_file_names = {k: None for k in self}
+            cache_file_names = dict.fromkeys(self)
         return DatasetDict(
             {
                 k: dataset.filter(
@@ -1000,7 +1081,7 @@ class DatasetDict(dict):
     def flatten_indices(
         self,
         keep_in_memory: bool = False,
-        cache_file_names: Optional[Dict[str, Optional[str]]] = None,
+        cache_file_names: Optional[dict[str, Optional[str]]] = None,
         writer_batch_size: Optional[int] = 1000,
         features: Optional[Features] = None,
         disable_nullable: bool = False,
@@ -1033,7 +1114,7 @@ class DatasetDict(dict):
         """
         self._check_values_type()
         if cache_file_names is None:
-            cache_file_names = {k: None for k in self}
+            cache_file_names = dict.fromkeys(self)
         return DatasetDict(
             {
                 k: dataset.flatten_indices(
@@ -1056,7 +1137,7 @@ class DatasetDict(dict):
         null_placement: str = "at_end",
         keep_in_memory: bool = False,
         load_from_cache_file: Optional[bool] = None,
-        indices_cache_file_names: Optional[Dict[str, Optional[str]]] = None,
+        indices_cache_file_names: Optional[dict[str, Optional[str]]] = None,
         writer_batch_size: Optional[int] = 1000,
     ) -> "DatasetDict":
         """Create a new dataset sorted according to a single or multiple columns.
@@ -1087,7 +1168,7 @@ class DatasetDict(dict):
 
         ```py
         >>> from datasets import load_dataset
-        >>> ds = load_dataset('rotten_tomatoes')
+        >>> ds = load_dataset('cornell-movie-review-data/rotten_tomatoes')
         >>> ds['train']['label'][:10]
         [1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
         >>> sorted_ds = ds.sort('label')
@@ -1100,7 +1181,7 @@ class DatasetDict(dict):
         """
         self._check_values_type()
         if indices_cache_file_names is None:
-            indices_cache_file_names = {k: None for k in self}
+            indices_cache_file_names = dict.fromkeys(self)
         return DatasetDict(
             {
                 k: dataset.sort(
@@ -1118,12 +1199,12 @@ class DatasetDict(dict):
 
     def shuffle(
         self,
-        seeds: Optional[Union[int, Dict[str, Optional[int]]]] = None,
+        seeds: Optional[Union[int, dict[str, Optional[int]]]] = None,
         seed: Optional[int] = None,
-        generators: Optional[Dict[str, np.random.Generator]] = None,
+        generators: Optional[dict[str, np.random.Generator]] = None,
         keep_in_memory: bool = False,
         load_from_cache_file: Optional[bool] = None,
-        indices_cache_file_names: Optional[Dict[str, Optional[str]]] = None,
+        indices_cache_file_names: Optional[dict[str, Optional[str]]] = None,
         writer_batch_size: Optional[int] = 1000,
     ) -> "DatasetDict":
         """Create a new Dataset where the rows are shuffled.
@@ -1163,7 +1244,7 @@ class DatasetDict(dict):
 
         ```py
         >>> from datasets import load_dataset
-        >>> ds = load_dataset("rotten_tomatoes")
+        >>> ds = load_dataset("cornell-movie-review-data/rotten_tomatoes")
         >>> ds["train"]["label"][:10]
         [1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
 
@@ -1178,13 +1259,13 @@ class DatasetDict(dict):
             raise ValueError("Please specify seed or seeds, but not both")
         seeds = seed if seed is not None else seeds
         if seeds is None:
-            seeds = {k: None for k in self}
+            seeds = dict.fromkeys(self)
         elif not isinstance(seeds, dict):
-            seeds = {k: seeds for k in self}
+            seeds = dict.fromkeys(self, seeds)
         if generators is None:
-            generators = {k: None for k in self}
+            generators = dict.fromkeys(self)
         if indices_cache_file_names is None:
-            indices_cache_file_names = {k: None for k in self}
+            indices_cache_file_names = dict.fromkeys(self)
         return DatasetDict(
             {
                 k: dataset.shuffle(
@@ -1203,16 +1284,16 @@ class DatasetDict(dict):
         self,
         dataset_dict_path: PathLike,
         max_shard_size: Optional[Union[str, int]] = None,
-        num_shards: Optional[Dict[str, int]] = None,
+        num_shards: Optional[dict[str, int]] = None,
         num_proc: Optional[int] = None,
         storage_options: Optional[dict] = None,
     ):
         """
         Saves a dataset dict to a filesystem using `fsspec.spec.AbstractFileSystem`.
 
-        For [`Image`] and [`Audio`] data:
+        For [`Image`], [`Audio`] and [`Video`] data:
 
-        All the Image() and Audio() data are stored in the arrow files.
+        All the Image(), Audio() and Video() data are stored in the arrow files.
         If you want to store paths or urls, please use the Value("string") type.
 
         Args:
@@ -1220,7 +1301,7 @@ class DatasetDict(dict):
                 Path (e.g. `dataset/train`) or remote URI (e.g. `s3://my-bucket/dataset/train`)
                 of the dataset dict directory where the dataset dict will be saved to.
             max_shard_size (`int` or `str`, *optional*, defaults to `"500MB"`):
-                The maximum size of the dataset shards to be uploaded to the hub. If expressed as a string, needs to be digits followed by a unit
+                The maximum size of the dataset shards to be saved to the filesystem. If expressed as a string, needs to be digits followed by a unit
                 (like `"50MB"`).
             num_shards (`Dict[str, int]`, *optional*):
                 Number of shards to write. By default the number of shards depends on `max_shard_size` and `num_proc`.
@@ -1250,7 +1331,7 @@ class DatasetDict(dict):
         fs, _ = url_to_fs(dataset_dict_path, **(storage_options or {}))
 
         if num_shards is None:
-            num_shards = {k: None for k in self}
+            num_shards = dict.fromkeys(self)
         elif not isinstance(num_shards, dict):
             raise ValueError(
                 "Please provide one `num_shards` per dataset in the dataset dictionary, e.g. {{'train': 128, 'test': 4}}"
@@ -1258,7 +1339,11 @@ class DatasetDict(dict):
 
         fs.makedirs(dataset_dict_path, exist_ok=True)
 
-        with fs.open(posixpath.join(dataset_dict_path, config.DATASETDICT_JSON_FILENAME), "w", encoding="utf-8") as f:
+        with fs.open(
+            posixpath.join(dataset_dict_path, config.DATASETDICT_JSON_FILENAME),
+            "w",
+            encoding="utf-8",
+        ) as f:
             json.dump({"splits": list(self)}, f)
         for k, dataset in self.items():
             dataset.save_to_disk(
@@ -1323,13 +1408,15 @@ class DatasetDict(dict):
         for k in splits:
             dataset_dict_split_path = posixpath.join(fs.unstrip_protocol(dataset_dict_path), k)
             dataset_dict[k] = Dataset.load_from_disk(
-                dataset_dict_split_path, keep_in_memory=keep_in_memory, storage_options=storage_options
+                dataset_dict_split_path,
+                keep_in_memory=keep_in_memory,
+                storage_options=storage_options,
             )
         return dataset_dict
 
     @staticmethod
     def from_csv(
-        path_or_paths: Dict[str, PathLike],
+        path_or_paths: dict[str, PathLike],
         features: Optional[Features] = None,
         cache_dir: str = None,
         keep_in_memory: bool = False,
@@ -1363,12 +1450,16 @@ class DatasetDict(dict):
         from .io.csv import CsvDatasetReader
 
         return CsvDatasetReader(
-            path_or_paths, features=features, cache_dir=cache_dir, keep_in_memory=keep_in_memory, **kwargs
+            path_or_paths,
+            features=features,
+            cache_dir=cache_dir,
+            keep_in_memory=keep_in_memory,
+            **kwargs,
         ).read()
 
     @staticmethod
     def from_json(
-        path_or_paths: Dict[str, PathLike],
+        path_or_paths: dict[str, PathLike],
         features: Optional[Features] = None,
         cache_dir: str = None,
         keep_in_memory: bool = False,
@@ -1402,16 +1493,20 @@ class DatasetDict(dict):
         from .io.json import JsonDatasetReader
 
         return JsonDatasetReader(
-            path_or_paths, features=features, cache_dir=cache_dir, keep_in_memory=keep_in_memory, **kwargs
+            path_or_paths,
+            features=features,
+            cache_dir=cache_dir,
+            keep_in_memory=keep_in_memory,
+            **kwargs,
         ).read()
 
     @staticmethod
     def from_parquet(
-        path_or_paths: Dict[str, PathLike],
+        path_or_paths: dict[str, PathLike],
         features: Optional[Features] = None,
         cache_dir: str = None,
         keep_in_memory: bool = False,
-        columns: Optional[List[str]] = None,
+        columns: Optional[list[str]] = None,
         **kwargs,
     ) -> "DatasetDict":
         """Create [`DatasetDict`] from Parquet file(s).
@@ -1425,7 +1520,7 @@ class DatasetDict(dict):
                 Directory to cache data.
             keep_in_memory (`bool`, defaults to `False`):
                 Whether to copy the data in-memory.
-            columns (`List[str]`, *optional*):
+            columns (`list[str]`, *optional*):
                 If not `None`, only these columns will be read from the file.
                 A column name may be a prefix of a nested field, e.g. 'a' will select
                 'a.b', 'a.c', and 'a.d.e'.
@@ -1456,7 +1551,7 @@ class DatasetDict(dict):
 
     @staticmethod
     def from_text(
-        path_or_paths: Dict[str, PathLike],
+        path_or_paths: dict[str, PathLike],
         features: Optional[Features] = None,
         cache_dir: str = None,
         keep_in_memory: bool = False,
@@ -1490,11 +1585,15 @@ class DatasetDict(dict):
         from .io.text import TextDatasetReader
 
         return TextDatasetReader(
-            path_or_paths, features=features, cache_dir=cache_dir, keep_in_memory=keep_in_memory, **kwargs
+            path_or_paths,
+            features=features,
+            cache_dir=cache_dir,
+            keep_in_memory=keep_in_memory,
+            **kwargs,
         ).read()
 
     @is_documented_by(Dataset.align_labels_with_mapping)
-    def align_labels_with_mapping(self, label2id: Dict, label_column: str) -> "DatasetDict":
+    def align_labels_with_mapping(self, label2id: dict, label_column: str) -> "DatasetDict":
         self._check_values_type()
         return DatasetDict(
             {
@@ -1511,13 +1610,14 @@ class DatasetDict(dict):
         data_dir: Optional[str] = None,
         commit_message: Optional[str] = None,
         commit_description: Optional[str] = None,
-        private: Optional[bool] = False,
+        private: Optional[bool] = None,
         token: Optional[str] = None,
         revision: Optional[str] = None,
         create_pr: Optional[bool] = False,
         max_shard_size: Optional[Union[int, str]] = None,
-        num_shards: Optional[Dict[str, int]] = None,
+        num_shards: Optional[dict[str, int]] = None,
         embed_external_files: bool = True,
+        num_proc: Optional[int] = None,
     ) -> CommitInfo:
         """Pushes the [`DatasetDict`] to the hub as a Parquet dataset.
         The [`DatasetDict`] is pushed using HTTP requests and does not need to have neither git or git-lfs installed.
@@ -1551,8 +1651,8 @@ class DatasetDict(dict):
 
                 <Added version="2.16.0"/>
             private (`bool`, *optional*):
-                Whether the dataset repository should be set to private or not. Only affects repository creation:
-                a repository that already exists will not be affected by that parameter.
+                Whether to make the repo private. If `None` (default), the repo will be public unless the
+                organization's default is private. This value is ignored if the repo already exists.
             token (`str`, *optional*):
                 An optional authentication token for the Hugging Face Hub. If no token is passed, will default
                 to the token saved locally when logging in with `huggingface-cli login`. Will raise an error
@@ -1578,6 +1678,12 @@ class DatasetDict(dict):
                 In particular, this will do the following before the push for the fields of type:
 
                 - [`Audio`] and [`Image`] removes local path information and embed file content in the Parquet files.
+            num_proc (`int`, *optional*, defaults to `None`):
+                Number of processes when preparing and uploading the dataset.
+                This is helpful if the dataset is made of many samples or media files to embed.
+                Multiprocessing is disabled by default.
+
+                <Added version="4.0.0"/>
 
         Return:
             huggingface_hub.CommitInfo
@@ -1602,7 +1708,7 @@ class DatasetDict(dict):
         ```
         """
         if num_shards is None:
-            num_shards = {k: None for k in self}
+            num_shards = dict.fromkeys(self)
         elif not isinstance(num_shards, dict):
             raise ValueError(
                 "Please provide one `num_shards` per dataset in the dataset dictionary, e.g. {{'train': 128, 'test': 4}}"
@@ -1633,7 +1739,13 @@ class DatasetDict(dict):
 
         if revision is not None and not revision.startswith("refs/pr/"):
             # We do not call create_branch for a PR reference: 400 Bad Request
-            api.create_branch(repo_id, branch=revision, token=token, repo_type="dataset", exist_ok=True)
+            api.create_branch(
+                repo_id,
+                branch=revision,
+                token=token,
+                repo_type="dataset",
+                exist_ok=True,
+            )
 
         if not data_dir:
             data_dir = config_name if config_name != "default" else "data"  # for backward compatibility
@@ -1652,6 +1764,7 @@ class DatasetDict(dict):
                 max_shard_size=max_shard_size,
                 num_shards=num_shards.get(split),
                 embed_external_files=embed_external_files,
+                num_proc=num_proc,
             )
             additions += split_additions
             total_uploaded_size += uploaded_size
@@ -1665,11 +1778,15 @@ class DatasetDict(dict):
         # Check if the repo already has a README.md and/or a dataset_infos.json to update them with the new split info (size and pattern)
         # and delete old split shards (if they exist)
         repo_with_dataset_card, repo_with_dataset_infos = False, False
-        repo_splits = []  # use a list to keep the order of the splits
-        deletions = []
+        repo_splits: list[str] = []  # use a list to keep the order of the splits
+        deletions: list[CommitOperationDelete] = []
         repo_files_to_add = [addition.path_in_repo for addition in additions]
         for repo_file in api.list_repo_tree(
-            repo_id=repo_id, revision=revision, repo_type="dataset", token=token, recursive=True
+            repo_id=repo_id,
+            revision=revision,
+            repo_type="dataset",
+            token=token,
+            recursive=True,
         ):
             if not isinstance(repo_file, RepoFile):
                 continue
@@ -1683,19 +1800,23 @@ class DatasetDict(dict):
             ):
                 deletions.append(CommitOperationDelete(path_in_repo=repo_file.rfilename))
             elif fnmatch.fnmatch(
-                repo_file.rfilename, PUSH_TO_HUB_WITHOUT_METADATA_CONFIGS_SPLIT_PATTERN_SHARDED.replace("{split}", "*")
+                repo_file.rfilename,
+                PUSH_TO_HUB_WITHOUT_METADATA_CONFIGS_SPLIT_PATTERN_SHARDED.replace("{split}", "*"),
             ):
-                repo_split = string_to_dict(
-                    repo_file.rfilename,
-                    glob_pattern_to_regex(PUSH_TO_HUB_WITHOUT_METADATA_CONFIGS_SPLIT_PATTERN_SHARDED),
-                )["split"]
+                pattern = glob_pattern_to_regex(PUSH_TO_HUB_WITHOUT_METADATA_CONFIGS_SPLIT_PATTERN_SHARDED)
+                split_pattern_fields = string_to_dict(repo_file.rfilename, pattern)
+                assert split_pattern_fields is not None
+                repo_split = split_pattern_fields["split"]
                 if repo_split not in repo_splits:
-                    repo_splits.append(split)
+                    repo_splits.append(repo_split)
 
         # get the info from the README to update them
         if repo_with_dataset_card:
             dataset_card_path = api.hf_hub_download(
-                repo_id, config.REPOCARD_FILENAME, repo_type="dataset", revision=revision
+                repo_id,
+                config.REPOCARD_FILENAME,
+                repo_type="dataset",
+                revision=revision,
             )
             dataset_card = DatasetCard.load(Path(dataset_card_path))
             dataset_card_data = dataset_card.data
@@ -1718,36 +1839,45 @@ class DatasetDict(dict):
         metadata_config_to_dump = {
             "data_files": [{"split": split, "path": f"{data_dir}/{split}-*"} for split in self.keys()],
         }
+        configs_to_dump = {config_name: metadata_config_to_dump}
         if set_default and config_name != "default":
             if metadata_configs:
-                default_config_name = metadata_configs.get_default_config_name()
-                if default_config_name == "default":
+                current_default_config_name = metadata_configs.get_default_config_name()
+                if current_default_config_name == "default":
                     raise ValueError(
                         "There exists a configuration named 'default'. To set a different configuration as default, "
                         "rename the 'default' one first."
                     )
-                else:
-                    _ = metadata_configs[default_config_name].pop("default")
+                if current_default_config_name:
+                    _ = metadata_configs[current_default_config_name].pop("default")
+                    configs_to_dump[current_default_config_name] = metadata_configs[current_default_config_name]
             metadata_config_to_dump["default"] = True
         # push to the deprecated dataset_infos.json
         if repo_with_dataset_infos:
             dataset_infos_path = api.hf_hub_download(
-                repo_id, config.DATASETDICT_INFOS_FILENAME, repo_type="dataset", revision=revision
+                repo_id,
+                config.DATASETDICT_INFOS_FILENAME,
+                repo_type="dataset",
+                revision=revision,
             )
             with open(dataset_infos_path, encoding="utf-8") as f:
                 dataset_infos: dict = json.load(f)
             dataset_infos[config_name] = asdict(info_to_dump)
-            buffer = BytesIO()
-            buffer.write(json.dumps(dataset_infos, indent=4).encode("utf-8"))
             additions.append(
-                CommitOperationAdd(path_in_repo=config.DATASETDICT_INFOS_FILENAME, path_or_fileobj=buffer)
+                CommitOperationAdd(
+                    path_in_repo=config.DATASETDICT_INFOS_FILENAME,
+                    path_or_fileobj=json.dumps(dataset_infos, indent=4).encode("utf-8"),
+                )
             )
         # push to README
         DatasetInfosDict({config_name: info_to_dump}).to_dataset_card_data(dataset_card_data)
-        MetadataConfigs({config_name: metadata_config_to_dump}).to_dataset_card_data(dataset_card_data)
+        MetadataConfigs(configs_to_dump).to_dataset_card_data(dataset_card_data)
         dataset_card = DatasetCard(f"---\n{dataset_card_data}\n---\n") if dataset_card is None else dataset_card
         additions.append(
-            CommitOperationAdd(path_in_repo=config.REPOCARD_FILENAME, path_or_fileobj=str(dataset_card).encode())
+            CommitOperationAdd(
+                path_in_repo=config.REPOCARD_FILENAME,
+                path_or_fileobj=str(dataset_card).encode(),
+            )
         )
 
         commit_message = commit_message if commit_message is not None else "Upload dataset"
@@ -1782,18 +1912,67 @@ class DatasetDict(dict):
                     create_pr=create_pr,
                 )
                 logger.info(
-                    f"Commit #{i+1} completed"
+                    f"Commit #{i + 1} completed"
                     + (f" (still {num_commits - i - 1} to go)" if num_commits - i - 1 else "")
                     + "."
                 )
         return commit_info
 
 
-class IterableDatasetDict(dict):
+class IterableDatasetDict(dict[Union[str, NamedSplit], IterableDataset]):
+    def _check_values_type(self):
+        for dataset in self.values():
+            if not isinstance(dataset, IterableDataset):
+                raise TypeError(f"Values in `DatasetDict` should be of type `Dataset` but got type '{type(dataset)}'")
+
+    def _check_values_features(self):
+        items = [(key, dataset._resolve_features()) for key, dataset in self.items()]
+        for item_a, item_b in zip(items[:-1], items[1:]):
+            if item_a[1].features != item_b[1].features:
+                raise ValueError(
+                    f"All datasets in `DatasetDict` should have the same features but features for '{item_a[0]}' and '{item_b[0]}' don't match: {item_a[1].features} != {item_b[1].features}"
+                )
+
     def __repr__(self):
         repr = "\n".join([f"{k}: {v}" for k, v in self.items()])
-        repr = re.sub(r"^", " " * 4, repr, 0, re.M)
+        repr = re.sub(r"^", " " * 4, repr, count=0, flags=re.M)
         return f"IterableDatasetDict({{\n{repr}\n}})"
+
+    @property
+    def num_columns(self) -> dict[str, Optional[int]]:
+        """Number of columns in each split of the dataset.
+        This can contain None valies if some splits have unknown features (e.g. after a map() operation).
+
+        Example:
+
+        ```py
+        >>> from datasets import load_dataset
+        >>> ds = load_dataset("cornell-movie-review-data/rotten_tomatoes")
+        >>> ds.num_columns
+        {'test': 2, 'train': 2, 'validation': 2}
+        ```
+        """
+        self._check_values_type()
+        return {k: dataset.num_columns for k, dataset in self.items()}
+
+    @property
+    def column_names(self) -> dict[str, Optional[list[str]]]:
+        """Names of the columns in each split of the dataset.
+        This can contain None valies if some splits have unknown features (e.g. after a map() operation).
+
+        Example:
+
+        ```py
+        >>> from datasets import load_dataset
+        >>> ds = load_dataset("cornell-movie-review-data/rotten_tomatoes")
+        >>> ds.column_names
+        {'test': ['text', 'label'],
+         'train': ['text', 'label'],
+         'validation': ['text', 'label']}
+        ```
+        """
+        self._check_values_type()
+        return {k: dataset.column_names for k, dataset in self.items()}
 
     def with_format(
         self,
@@ -1801,25 +1980,42 @@ class IterableDatasetDict(dict):
     ) -> "IterableDatasetDict":
         """
         Return a dataset with the specified format.
-        This method only supports the "torch" format for now.
-        The format is set to all the datasets of the dataset dictionary.
 
         Args:
-            type (`str`, *optional*, defaults to `None`):
-                If set to "torch", the returned dataset
-                will be a subclass of `torch.utils.data.IterableDataset` to be used in a `DataLoader`.
+
+            type (`str`, *optional*):
+                Either output type selected in `[None, 'numpy', 'torch', 'tensorflow', 'jax', 'arrow', 'pandas', 'polars']`.
+                `None` means it returns python objects (default).
 
         Example:
 
         ```py
         >>> from datasets import load_dataset
-        >>> ds = load_dataset("rotten_tomatoes", streaming=True)
         >>> from transformers import AutoTokenizer
-        >>> tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
-        >>> def encode(example):
-        ...     return tokenizer(examples["text"], truncation=True, padding="max_length")
-        >>> ds = ds.map(encode, batched=True, remove_columns=["text"])
+        >>> ds = load_dataset("cornell-movie-review-data/rotten_tomatoes", split="validation", streaming=True)
+        >>> tokenizer = AutoTokenizer.from_pretrained("bert-base-cased")
+        >>> ds = ds.map(lambda x: tokenizer(x['text'], truncation=True, padding=True), batched=True)
         >>> ds = ds.with_format("torch")
+        >>> next(iter(ds))
+        {'text': 'compassionately explores the seemingly irreconcilable situation between conservative christian parents and their estranged gay and lesbian children .',
+         'label': tensor(1),
+         'input_ids': tensor([  101, 18027, 16310, 16001,  1103,  9321,   178, 11604,  7235,  6617,
+                1742,  2165,  2820,  1206,  6588, 22572, 12937,  1811,  2153,  1105,
+                1147, 12890, 19587,  6463,  1105, 15026,  1482,   119,   102,     0,
+                    0,     0,     0,     0,     0,     0,     0,     0,     0,     0,
+                    0,     0,     0,     0,     0,     0,     0,     0,     0,     0,
+                    0,     0,     0,     0,     0,     0,     0,     0,     0,     0,
+                    0,     0,     0,     0,     0,     0,     0,     0,     0,     0,
+                    0,     0,     0,     0,     0,     0,     0,     0,     0,     0,
+                    0,     0,     0,     0]),
+         'token_type_ids': tensor([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+         'attention_mask': tensor([1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+                1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])}
         ```
         """
         return IterableDatasetDict({k: dataset.with_format(type=type) for k, dataset in self.items()})
@@ -1828,11 +2024,12 @@ class IterableDatasetDict(dict):
         self,
         function: Optional[Callable] = None,
         with_indices: bool = False,
-        input_columns: Optional[Union[str, List[str]]] = None,
+        with_split: bool = False,
+        input_columns: Optional[Union[str, list[str]]] = None,
         batched: bool = False,
         batch_size: int = 1000,
         drop_last_batch: bool = False,
-        remove_columns: Optional[Union[str, List[str]]] = None,
+        remove_columns: Optional[Union[str, list[str]]] = None,
         fn_kwargs: Optional[dict] = None,
     ) -> "IterableDatasetDict":
         """
@@ -1851,6 +2048,9 @@ class IterableDatasetDict(dict):
           Note that the last batch may have less than `n` examples.
           A batch is a dictionary, e.g. a batch of `n` examples is `{"text": ["Hello there !"] * n}`.
 
+        If the function is asynchronous, then `map` will run your function in parallel, with up to one thousand simultaneous calls.
+        It is recommended to use a `asyncio.Semaphore` in your function if you want to set a maximum number of operations that can run at the same time.
+
         Args:
             function (`Callable`, *optional*, defaults to `None`):
                 Function applied on-the-fly on the examples when you iterate on the dataset.
@@ -1858,15 +2058,16 @@ class IterableDatasetDict(dict):
 
                 - `function(example: Dict[str, Any]) -> Dict[str, Any]` if `batched=False` and `with_indices=False`
                 - `function(example: Dict[str, Any], idx: int) -> Dict[str, Any]` if `batched=False` and `with_indices=True`
-                - `function(batch: Dict[str, List]) -> Dict[str, List]` if `batched=True` and `with_indices=False`
-                - `function(batch: Dict[str, List], indices: List[int]) -> Dict[str, List]` if `batched=True` and `with_indices=True`
+                - `function(batch: Dict[str, list]) -> Dict[str, list]` if `batched=True` and `with_indices=False`
+                - `function(batch: Dict[str, list], indices: list[int]) -> Dict[str, list]` if `batched=True` and `with_indices=True`
 
                 For advanced usage, the function can also return a `pyarrow.Table`.
+                If the function is asynchronous, then `map` will run your function in parallel.
                 Moreover if your function returns nothing (`None`), then `map` will run your function and return the dataset unchanged.
                 If no function is provided, default to identity function: `lambda x: x`.
             with_indices (`bool`, defaults to `False`):
                 Provide example indices to `function`. Note that in this case the signature of `function` should be `def function(example, idx[, rank]): ...`.
-            input_columns (`[Union[str, List[str]]]`, *optional*, defaults to `None`):
+            input_columns (`[Union[str, list[str]]]`, *optional*, defaults to `None`):
                 The columns to be passed into `function`
                 as positional arguments. If `None`, a dict mapping to all formatted columns is passed as one argument.
             batched (`bool`, defaults to `False`):
@@ -1876,7 +2077,7 @@ class IterableDatasetDict(dict):
             drop_last_batch (`bool`, defaults to `False`):
                 Whether a last batch smaller than the `batch_size` should be
                 dropped instead of being processed by the function.
-            remove_columns (`[List[str]]`, *optional*, defaults to `None`):
+            remove_columns (`[list[str]]`, *optional*, defaults to `None`):
                 Remove a selection of columns while doing the mapping.
                 Columns will be removed before updating the examples with the output of `function`, i.e. if `function` is adding
                 columns with names in `remove_columns`, these columns will be kept.
@@ -1887,7 +2088,7 @@ class IterableDatasetDict(dict):
 
         ```py
         >>> from datasets import load_dataset
-        >>> ds = load_dataset("rotten_tomatoes", streaming=True)
+        >>> ds = load_dataset("cornell-movie-review-data/rotten_tomatoes", streaming=True)
         >>> def add_prefix(example):
         ...     example["text"] = "Review: " + example["text"]
         ...     return example
@@ -1897,27 +2098,33 @@ class IterableDatasetDict(dict):
          'text': 'Review: the rock is destined to be the 21st century\'s new " conan " and that he\'s going to make a splash even greater than arnold schwarzenegger , jean-claud van damme or steven segal .'}
         ```
         """
-        return IterableDatasetDict(
-            {
-                k: dataset.map(
-                    function=function,
-                    with_indices=with_indices,
-                    input_columns=input_columns,
-                    batched=batched,
-                    batch_size=batch_size,
-                    drop_last_batch=drop_last_batch,
-                    remove_columns=remove_columns,
-                    fn_kwargs=fn_kwargs,
-                )
-                for k, dataset in self.items()
-            }
-        )
+
+        dataset_dict = {}
+        for split, dataset in self.items():
+            if with_split:
+                function = bind(function, split)
+
+            dataset_dict[split] = dataset.map(
+                function=function,
+                with_indices=with_indices,
+                input_columns=input_columns,
+                batched=batched,
+                batch_size=batch_size,
+                drop_last_batch=drop_last_batch,
+                remove_columns=remove_columns,
+                fn_kwargs=fn_kwargs,
+            )
+
+            if with_split:
+                function = function.func
+
+        return IterableDatasetDict(dataset_dict)
 
     def filter(
         self,
         function: Optional[Callable] = None,
         with_indices=False,
-        input_columns: Optional[Union[str, List[str]]] = None,
+        input_columns: Optional[Union[str, list[str]]] = None,
         batched: bool = False,
         batch_size: Optional[int] = 1000,
         fn_kwargs: Optional[dict] = None,
@@ -1932,13 +2139,13 @@ class IterableDatasetDict(dict):
 
                 - `function(example: Dict[str, Any]) -> bool` if `with_indices=False, batched=False`
                 - `function(example: Dict[str, Any], indices: int) -> bool` if `with_indices=True, batched=False`
-                - `function(example: Dict[str, List]) -> List[bool]` if `with_indices=False, batched=True`
-                - `function(example: Dict[str, List], indices: List[int]) -> List[bool]` if `with_indices=True, batched=True`
+                - `function(example: Dict[str, list]) -> list[bool]` if `with_indices=False, batched=True`
+                - `function(example: Dict[str, list], indices: list[int]) -> list[bool]` if `with_indices=True, batched=True`
 
                 If no function is provided, defaults to an always True function: `lambda x: True`.
             with_indices (`bool`, defaults to `False`):
                 Provide example indices to `function`. Note that in this case the signature of `function` should be `def function(example, idx): ...`.
-            input_columns (`str` or `List[str]`, *optional*):
+            input_columns (`str` or `list[str]`, *optional*):
                 The columns to be passed into `function` as
                 positional arguments. If `None`, a dict mapping to all formatted columns is passed as one argument.
             batched (`bool`, defaults to `False`):
@@ -1952,7 +2159,7 @@ class IterableDatasetDict(dict):
 
         ```py
         >>> from datasets import load_dataset
-        >>> ds = load_dataset("rotten_tomatoes", streaming=True)
+        >>> ds = load_dataset("cornell-movie-review-data/rotten_tomatoes", streaming=True)
         >>> ds = ds.filter(lambda x: x["label"] == 0)
         >>> list(ds["train"].take(3))
         [{'label': 0, 'text': 'Review: simplistic , silly and tedious .'},
@@ -1977,7 +2184,10 @@ class IterableDatasetDict(dict):
         )
 
     def shuffle(
-        self, seed=None, generator: Optional[np.random.Generator] = None, buffer_size: int = 1000
+        self,
+        seed=None,
+        generator: Optional[np.random.Generator] = None,
+        buffer_size: int = 1000,
     ) -> "IterableDatasetDict":
         """
         Randomly shuffles the elements of this dataset.
@@ -2010,7 +2220,7 @@ class IterableDatasetDict(dict):
 
         ```py
         >>> from datasets import load_dataset
-        >>> ds = load_dataset("rotten_tomatoes", streaming=True)
+        >>> ds = load_dataset("cornell-movie-review-data/rotten_tomatoes", streaming=True)
         >>> list(ds["train"].take(3))
         [{'label': 1,
          'text': 'the rock is destined to be the 21st century\'s new " conan " and that he\'s going to make a splash even greater than arnold schwarzenegger , jean-claud van damme or steven segal .'},
@@ -2053,7 +2263,7 @@ class IterableDatasetDict(dict):
 
         ```py
         >>> from datasets import load_dataset
-        >>> ds = load_dataset("rotten_tomatoes", streaming=True)
+        >>> ds = load_dataset("cornell-movie-review-data/rotten_tomatoes", streaming=True)
         >>> ds = ds.rename_column("text", "movie_review")
         >>> next(iter(ds["train"]))
         {'label': 1,
@@ -2062,12 +2272,15 @@ class IterableDatasetDict(dict):
         """
         return IterableDatasetDict(
             {
-                k: dataset.rename_column(original_column_name=original_column_name, new_column_name=new_column_name)
+                k: dataset.rename_column(
+                    original_column_name=original_column_name,
+                    new_column_name=new_column_name,
+                )
                 for k, dataset in self.items()
             }
         )
 
-    def rename_columns(self, column_mapping: Dict[str, str]) -> "IterableDatasetDict":
+    def rename_columns(self, column_mapping: dict[str, str]) -> "IterableDatasetDict":
         """
         Rename several columns in the dataset, and move the features associated to the original columns under
         the new column names.
@@ -2084,7 +2297,7 @@ class IterableDatasetDict(dict):
 
         ```py
         >>> from datasets import load_dataset
-        >>> ds = load_dataset("rotten_tomatoes", streaming=True)
+        >>> ds = load_dataset("cornell-movie-review-data/rotten_tomatoes", streaming=True)
         >>> ds = ds.rename_columns({"text": "movie_review", "label": "rating"})
         >>> next(iter(ds["train"]))
         {'movie_review': 'the rock is destined to be the 21st century\'s new " conan " and that he\'s going to make a splash even greater than arnold schwarzenegger , jean-claud van damme or steven segal .',
@@ -2095,7 +2308,7 @@ class IterableDatasetDict(dict):
             {k: dataset.rename_columns(column_mapping=column_mapping) for k, dataset in self.items()}
         )
 
-    def remove_columns(self, column_names: Union[str, List[str]]) -> "IterableDatasetDict":
+    def remove_columns(self, column_names: Union[str, list[str]]) -> "IterableDatasetDict":
         """
         Remove one or several column(s) in the dataset and the features associated to them.
         The removal is done on-the-fly on the examples when iterating over the dataset.
@@ -2103,7 +2316,7 @@ class IterableDatasetDict(dict):
 
 
         Args:
-            column_names (`Union[str, List[str]]`):
+            column_names (`Union[str, list[str]]`):
                 Name of the column(s) to remove.
 
         Returns:
@@ -2113,7 +2326,7 @@ class IterableDatasetDict(dict):
 
         ```py
         >>> from datasets import load_dataset
-        >>> ds = load_dataset("rotten_tomatoes", streaming=True)
+        >>> ds = load_dataset("cornell-movie-review-data/rotten_tomatoes", streaming=True)
         >>> ds = ds.remove_columns("label")
         >>> next(iter(ds["train"]))
         {'text': 'the rock is destined to be the 21st century\'s new " conan " and that he\'s going to make a splash even greater than arnold schwarzenegger , jean-claud van damme or steven segal .'}
@@ -2121,7 +2334,7 @@ class IterableDatasetDict(dict):
         """
         return IterableDatasetDict({k: dataset.remove_columns(column_names) for k, dataset in self.items()})
 
-    def select_columns(self, column_names: Union[str, List[str]]) -> "IterableDatasetDict":
+    def select_columns(self, column_names: Union[str, list[str]]) -> "IterableDatasetDict":
         """Select one or several column(s) in the dataset and the features
         associated to them. The selection is done on-the-fly on the examples
         when iterating over the dataset. The selection is applied to all the
@@ -2129,7 +2342,7 @@ class IterableDatasetDict(dict):
 
 
         Args:
-            column_names (`Union[str, List[str]]`):
+            column_names (`Union[str, list[str]]`):
                 Name of the column(s) to keep.
 
         Returns:
@@ -2139,7 +2352,7 @@ class IterableDatasetDict(dict):
 
         ```py
         >>> from datasets import load_dataset
-        >>> ds = load_dataset("rotten_tomatoes", streaming=True)
+        >>> ds = load_dataset("cornell-movie-review-data/rotten_tomatoes", streaming=True)
         >>> ds = ds.select("text")
         >>> next(iter(ds["train"]))
         {'text': 'the rock is destined to be the 21st century\'s new " conan " and that he\'s going to make a splash even greater than arnold schwarzenegger , jean-claud van damme or steven segal .'}
@@ -2163,14 +2376,14 @@ class IterableDatasetDict(dict):
         Example:
 
         ```py
-        >>> from datasets import load_dataset
-        >>> ds = load_dataset("rotten_tomatoes", streaming=True)
+        >>> from datasets import load_dataset, ClassLabel
+        >>> ds = load_dataset("cornell-movie-review-data/rotten_tomatoes", streaming=True)
         >>> ds["train"].features
-        {'label': ClassLabel(num_classes=2, names=['neg', 'pos'], id=None),
+        {'label': ClassLabel(names=['neg', 'pos'], id=None),
          'text': Value(dtype='string', id=None)}
         >>> ds = ds.cast_column('label', ClassLabel(names=['bad', 'good']))
         >>> ds["train"].features
-        {'label': ClassLabel(num_classes=2, names=['bad', 'good'], id=None),
+        {'label': ClassLabel(names=['bad', 'good'], id=None),
          'text': Value(dtype='string', id=None)}
         ```
         """
@@ -2200,17 +2413,323 @@ class IterableDatasetDict(dict):
 
         ```py
         >>> from datasets import load_dataset
-        >>> ds = load_dataset("rotten_tomatoes", streaming=True)
+        >>> ds = load_dataset("cornell-movie-review-data/rotten_tomatoes", streaming=True)
         >>> ds["train"].features
-        {'label': ClassLabel(num_classes=2, names=['neg', 'pos'], id=None),
+        {'label': ClassLabel(names=['neg', 'pos'], id=None),
          'text': Value(dtype='string', id=None)}
         >>> new_features = ds["train"].features.copy()
         >>> new_features['label'] = ClassLabel(names=['bad', 'good'])
         >>> new_features['text'] = Value('large_string')
         >>> ds = ds.cast(new_features)
         >>> ds["train"].features
-        {'label': ClassLabel(num_classes=2, names=['bad', 'good'], id=None),
+        {'label': ClassLabel(names=['bad', 'good'], id=None),
          'text': Value(dtype='large_string', id=None)}
         ```
         """
         return IterableDatasetDict({k: dataset.cast(features=features) for k, dataset in self.items()})
+
+    def push_to_hub(
+        self,
+        repo_id,
+        config_name: str = "default",
+        set_default: Optional[bool] = None,
+        data_dir: Optional[str] = None,
+        commit_message: Optional[str] = None,
+        commit_description: Optional[str] = None,
+        private: Optional[bool] = None,
+        token: Optional[str] = None,
+        revision: Optional[str] = None,
+        create_pr: Optional[bool] = False,
+        # max_shard_size: Optional[Union[int, str]] = None,  # TODO(QL): add arg
+        num_shards: Optional[dict[str, int]] = None,
+        embed_external_files: bool = True,
+        num_proc: Optional[int] = None,
+    ) -> CommitInfo:
+        """Pushes the [`DatasetDict`] to the hub as a Parquet dataset.
+        The [`DatasetDict`] is pushed using HTTP requests and does not need to have neither git or git-lfs installed.
+
+        Each dataset split will be pushed independently. The pushed dataset will keep the original split names.
+
+        The resulting Parquet files are self-contained by default: if your dataset contains [`Image`] or [`Audio`]
+        data, the Parquet files will store the bytes of your images or audio files.
+        You can disable this by setting `embed_external_files` to False.
+
+        Args:
+            repo_id (`str`):
+                The ID of the repository to push to in the following format: `<user>/<dataset_name>` or
+                `<org>/<dataset_name>`. Also accepts `<dataset_name>`, which will default to the namespace
+                of the logged-in user.
+            config_name (`str`):
+                Configuration name of a dataset. Defaults to "default".
+            set_default (`bool`, *optional*):
+                Whether to set this configuration as the default one. Otherwise, the default configuration is the one
+                named "default".
+            data_dir (`str`, *optional*):
+                Directory name that will contain the uploaded data files. Defaults to the `config_name` if different
+                from "default", else "data".
+
+                <Added version="2.17.0"/>
+            commit_message (`str`, *optional*):
+                Message to commit while pushing. Will default to `"Upload dataset"`.
+            commit_description (`str`, *optional*):
+                Description of the commit that will be created.
+                Additionally, description of the PR if a PR is created (`create_pr` is True).
+
+                <Added version="2.16.0"/>
+            private (`bool`, *optional*):
+                Whether to make the repo private. If `None` (default), the repo will be public unless the
+                organization's default is private. This value is ignored if the repo already exists.
+            token (`str`, *optional*):
+                An optional authentication token for the Hugging Face Hub. If no token is passed, will default
+                to the token saved locally when logging in with `huggingface-cli login`. Will raise an error
+                if no token is passed and the user is not logged-in.
+            revision (`str`, *optional*):
+                Branch to push the uploaded files to. Defaults to the `"main"` branch.
+            create_pr (`bool`, *optional*, defaults to `False`):
+                Whether to create a PR with the uploaded files or directly commit.
+            num_shards (`Dict[str, int]`, *optional*):
+                Number of shards to write. Equals to this dataset's `.num_shards` by default.
+                Use a dictionary to define a different num_shards for each split.
+            embed_external_files (`bool`, defaults to `True`):
+                Whether to embed file bytes in the shards.
+                In particular, this will do the following before the push for the fields of type:
+
+                - [`Audio`] and [`Image`] removes local path information and embed file content in the Parquet files.
+            num_proc (`int`, *optional*, defaults to `None`):
+                Number of processes when preparing and uploading the dataset.
+                This is helpful if the dataset is made of many samples or media files to embed.
+                Multiprocessing is disabled by default.
+
+                <Added version="4.0.0"/>
+
+        Return:
+            huggingface_hub.CommitInfo
+
+        Example:
+
+        ```python
+        >>> dataset_dict.push_to_hub("<organization>/<dataset_id>")
+        >>> dataset_dict.push_to_hub("<organization>/<dataset_id>", private=True)
+        >>> dataset_dict.push_to_hub("<organization>/<dataset_id>", num_shards={"train": 1024, "test": 8})
+        ```
+
+        If you want to add a new configuration (or subset) to a dataset (e.g. if the dataset has multiple tasks/versions/languages):
+
+        ```python
+        >>> english_dataset.push_to_hub("<organization>/<dataset_id>", "en")
+        >>> french_dataset.push_to_hub("<organization>/<dataset_id>", "fr")
+        >>> # later
+        >>> english_dataset = load_dataset("<organization>/<dataset_id>", "en")
+        >>> french_dataset = load_dataset("<organization>/<dataset_id>", "fr")
+        ```
+        """
+        if num_shards is None:
+            num_shards = dict.fromkeys(self)
+        elif not isinstance(num_shards, dict):
+            raise ValueError(
+                "Please provide one `num_shards` per dataset in the dataset dictionary, e.g. {{'train': 128, 'test': 4}}"
+            )
+
+        self._check_values_type()
+        self._check_values_features()
+        total_uploaded_size = 0
+        total_dataset_nbytes = 0
+        info_to_dump: DatasetInfo = next(iter(self.values())).info.copy()
+        info_to_dump.config_name = config_name
+        info_to_dump.splits = SplitDict()
+
+        for split in self.keys():
+            if not re.match(_split_re, split):
+                raise ValueError(f"Split name should match '{_split_re}' but got '{split}'.")
+
+        api = HfApi(endpoint=config.HF_ENDPOINT, token=token)
+
+        repo_url = api.create_repo(
+            repo_id,
+            token=token,
+            repo_type="dataset",
+            private=private,
+            exist_ok=True,
+        )
+        repo_id = repo_url.repo_id
+
+        if revision is not None and not revision.startswith("refs/pr/"):
+            # We do not call create_branch for a PR reference: 400 Bad Request
+            api.create_branch(
+                repo_id,
+                branch=revision,
+                token=token,
+                repo_type="dataset",
+                exist_ok=True,
+            )
+
+        if not data_dir:
+            data_dir = config_name if config_name != "default" else "data"  # for backward compatibility
+
+        additions = []
+        for split in self.keys():
+            logger.info(f"Pushing split {split} to the Hub.")
+            # The split=key needs to be removed before merging
+            split_additions, uploaded_size, dataset_nbytes, num_examples = self[split]._push_parquet_shards_to_hub(
+                repo_id,
+                data_dir=data_dir,
+                split=split,
+                token=token,
+                revision=revision,
+                create_pr=create_pr,
+                # max_shard_size=max_shard_size,  # TODO(QL): add arg
+                num_shards=num_shards.get(split),
+                embed_external_files=embed_external_files,
+                num_proc=num_proc,
+            )
+            additions += split_additions
+            total_uploaded_size += uploaded_size
+            total_dataset_nbytes += dataset_nbytes
+            info_to_dump.splits[split] = SplitInfo(str(split), num_bytes=dataset_nbytes, num_examples=num_examples)
+        info_to_dump.download_checksums = None
+        info_to_dump.download_size = total_uploaded_size
+        info_to_dump.dataset_size = total_dataset_nbytes
+        info_to_dump.size_in_bytes = total_uploaded_size + total_dataset_nbytes
+
+        # Check if the repo already has a README.md and/or a dataset_infos.json to update them with the new split info (size and pattern)
+        # and delete old split shards (if they exist)
+        repo_with_dataset_card, repo_with_dataset_infos = False, False
+        repo_splits: list[str] = []  # use a list to keep the order of the splits
+        deletions: list[CommitOperationDelete] = []
+        repo_files_to_add = [addition.path_in_repo for addition in additions]
+        for repo_file in api.list_repo_tree(
+            repo_id=repo_id,
+            revision=revision,
+            repo_type="dataset",
+            token=token,
+            recursive=True,
+        ):
+            if not isinstance(repo_file, RepoFile):
+                continue
+            if repo_file.rfilename == config.REPOCARD_FILENAME:
+                repo_with_dataset_card = True
+            elif repo_file.rfilename == config.DATASETDICT_INFOS_FILENAME:
+                repo_with_dataset_infos = True
+            elif (
+                repo_file.rfilename.startswith(tuple(f"{data_dir}/{split}-" for split in self.keys()))
+                and repo_file.rfilename not in repo_files_to_add
+            ):
+                deletions.append(CommitOperationDelete(path_in_repo=repo_file.rfilename))
+            elif fnmatch.fnmatch(
+                repo_file.rfilename,
+                PUSH_TO_HUB_WITHOUT_METADATA_CONFIGS_SPLIT_PATTERN_SHARDED.replace("{split}", "*"),
+            ):
+                pattern = glob_pattern_to_regex(PUSH_TO_HUB_WITHOUT_METADATA_CONFIGS_SPLIT_PATTERN_SHARDED)
+                split_pattern_fields = string_to_dict(repo_file.rfilename, pattern)
+                assert split_pattern_fields is not None
+                repo_split = split_pattern_fields["split"]
+                if repo_split not in repo_splits:
+                    repo_splits.append(repo_split)
+
+        # get the info from the README to update them
+        if repo_with_dataset_card:
+            dataset_card_path = api.hf_hub_download(
+                repo_id,
+                config.REPOCARD_FILENAME,
+                repo_type="dataset",
+                revision=revision,
+            )
+            dataset_card = DatasetCard.load(Path(dataset_card_path))
+            dataset_card_data = dataset_card.data
+            metadata_configs = MetadataConfigs.from_dataset_card_data(dataset_card_data)
+        # get the deprecated dataset_infos.json to update them
+        elif repo_with_dataset_infos:
+            dataset_card = None
+            dataset_card_data = DatasetCardData()
+            metadata_configs = MetadataConfigs()
+        else:
+            dataset_card = None
+            dataset_card_data = DatasetCardData()
+            metadata_configs = MetadataConfigs()
+        # create the metadata configs if it was uploaded with push_to_hub before metadata configs existed
+        if not metadata_configs and repo_splits:
+            default_metadata_configs_to_dump = {
+                "data_files": [{"split": split, "path": f"data/{split}-*"} for split in repo_splits]
+            }
+            MetadataConfigs({"default": default_metadata_configs_to_dump}).to_dataset_card_data(dataset_card_data)
+        metadata_config_to_dump = {
+            "data_files": [{"split": split, "path": f"{data_dir}/{split}-*"} for split in self.keys()],
+        }
+        configs_to_dump = {config_name: metadata_config_to_dump}
+        if set_default and config_name != "default":
+            if metadata_configs:
+                current_default_config_name = metadata_configs.get_default_config_name()
+                if current_default_config_name == "default":
+                    raise ValueError(
+                        "There exists a configuration named 'default'. To set a different configuration as default, "
+                        "rename the 'default' one first."
+                    )
+                if current_default_config_name:
+                    _ = metadata_configs[current_default_config_name].pop("default")
+                    configs_to_dump[current_default_config_name] = metadata_configs[current_default_config_name]
+            metadata_config_to_dump["default"] = True
+        # push to the deprecated dataset_infos.json
+        if repo_with_dataset_infos:
+            dataset_infos_path = api.hf_hub_download(
+                repo_id,
+                config.DATASETDICT_INFOS_FILENAME,
+                repo_type="dataset",
+                revision=revision,
+            )
+            with open(dataset_infos_path, encoding="utf-8") as f:
+                dataset_infos: dict = json.load(f)
+            dataset_infos[config_name] = asdict(info_to_dump)
+            additions.append(
+                CommitOperationAdd(
+                    path_in_repo=config.DATASETDICT_INFOS_FILENAME,
+                    path_or_fileobj=json.dumps(dataset_infos, indent=4).encode("utf-8"),
+                )
+            )
+        # push to README
+        DatasetInfosDict({config_name: info_to_dump}).to_dataset_card_data(dataset_card_data)
+        MetadataConfigs(configs_to_dump).to_dataset_card_data(dataset_card_data)
+        dataset_card = DatasetCard(f"---\n{dataset_card_data}\n---\n") if dataset_card is None else dataset_card
+        additions.append(
+            CommitOperationAdd(
+                path_in_repo=config.REPOCARD_FILENAME,
+                path_or_fileobj=str(dataset_card).encode(),
+            )
+        )
+
+        commit_message = commit_message if commit_message is not None else "Upload dataset"
+        if len(additions) <= config.UPLOADS_MAX_NUMBER_PER_COMMIT:
+            commit_info = api.create_commit(
+                repo_id,
+                operations=additions + deletions,
+                commit_message=commit_message,
+                commit_description=commit_description,
+                token=token,
+                repo_type="dataset",
+                revision=revision,
+                create_pr=create_pr,
+            )
+        else:
+            logger.info(
+                f"Number of files to upload is larger than {config.UPLOADS_MAX_NUMBER_PER_COMMIT}. Splitting the push into multiple commits."
+            )
+            num_commits = math.ceil(len(additions) / config.UPLOADS_MAX_NUMBER_PER_COMMIT)
+            for i in range(0, num_commits):
+                operations = additions[
+                    i * config.UPLOADS_MAX_NUMBER_PER_COMMIT : (i + 1) * config.UPLOADS_MAX_NUMBER_PER_COMMIT
+                ] + (deletions if i == 0 else [])
+                commit_info = api.create_commit(
+                    repo_id,
+                    operations=operations,
+                    commit_message=commit_message + f" (part {i:05d}-of-{num_commits:05d})",
+                    commit_description=commit_description,
+                    token=token,
+                    repo_type="dataset",
+                    revision=revision,
+                    create_pr=create_pr,
+                )
+                logger.info(
+                    f"Commit #{i + 1} completed"
+                    + (f" (still {num_commits - i - 1} to go)" if num_commits - i - 1 else "")
+                    + "."
+                )
+        return commit_info

@@ -3,7 +3,7 @@ import sys
 import warnings
 from dataclasses import dataclass, field
 from io import BytesIO
-from typing import TYPE_CHECKING, Any, ClassVar, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Any, ClassVar, Optional, Union
 
 import numpy as np
 import pyarrow as pa
@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     from .features import FeatureType
 
 
-_IMAGE_COMPRESSION_FORMATS: Optional[List[str]] = None
+_IMAGE_COMPRESSION_FORMATS: Optional[list[str]] = None
 _NATIVE_BYTEORDER = "<" if sys.byteorder == "little" else ">"
 # Origin: https://github.com/python-pillow/Pillow/blob/698951e19e19972aeed56df686868f1329981c12/src/PIL/Image.py#L3126 minus "|i1" which values are not preserved correctly when saving and loading an image
 _VALID_IMAGE_ARRAY_DTPYES = [
@@ -53,10 +53,12 @@ class Image:
         - `path`: String with relative path of the image file to the archive file.
         - `bytes`: Bytes of the image file.
 
-      This is useful for archived files with sequential access.
+      This is useful for parquet or webdataset files which embed image files.
 
     - An `np.ndarray`: NumPy array representing an image.
     - A `PIL.Image.Image`: PIL image object.
+
+    Output: The Image features output data as `PIL.Image.Image` objects.
 
     Args:
         mode (`str`, *optional*):
@@ -69,7 +71,7 @@ class Image:
 
     ```py
     >>> from datasets import load_dataset, Image
-    >>> ds = load_dataset("beans", split="train")
+    >>> ds = load_dataset("AI-Lab-Makerere/beans", split="train")
     >>> ds.features["image"]
     Image(decode=True, id=None)
     >>> ds[0]["image"]
@@ -82,7 +84,7 @@ class Image:
 
     mode: Optional[str] = None
     decode: bool = True
-    id: Optional[str] = None
+    id: Optional[str] = field(default=None, repr=False)
     # Automatically constructed
     dtype: ClassVar[str] = "PIL.Image.Image"
     pa_type: ClassVar[Any] = pa.struct({"bytes": pa.binary(), "path": pa.string()})
@@ -91,7 +93,7 @@ class Image:
     def __call__(self):
         return self.pa_type
 
-    def encode_example(self, value: Union[str, bytes, dict, np.ndarray, "PIL.Image.Image"]) -> dict:
+    def encode_example(self, value: Union[str, bytes, bytearray, dict, np.ndarray, "PIL.Image.Image"]) -> dict:
         """Encode example into a format for Arrow.
 
         Args:
@@ -111,7 +113,7 @@ class Image:
 
         if isinstance(value, str):
             return {"path": value, "bytes": None}
-        elif isinstance(value, bytes):
+        elif isinstance(value, (bytes, bytearray)):
             return {"path": None, "bytes": value}
         elif isinstance(value, np.ndarray):
             # convert the image array to PNG/TIFF bytes
@@ -174,11 +176,10 @@ class Image:
                         if source_url.startswith(config.HF_ENDPOINT)
                         else config.HUB_DATASETS_HFFS_URL
                     )
-                    try:
-                        repo_id = string_to_dict(source_url, pattern)["repo_id"]
-                        token = token_per_repo_id.get(repo_id)
-                    except ValueError:
-                        token = None
+                    source_url_fields = string_to_dict(source_url, pattern)
+                    token = (
+                        token_per_repo_id.get(source_url_fields["repo_id"]) if source_url_fields is not None else None
+                    )
                     download_config = DownloadConfig(token=token)
                     with xopen(path, "rb", download_config=download_config) as f:
                         bytes_ = BytesIO(f.read())
@@ -192,7 +193,7 @@ class Image:
             image = image.convert(self.mode)
         return image
 
-    def flatten(self) -> Union["FeatureType", Dict[str, "FeatureType"]]:
+    def flatten(self) -> Union["FeatureType", dict[str, "FeatureType"]]:
         """If in the decodable state, return the feature itself, otherwise flatten the feature into a dictionary."""
         from .features import Value
 
@@ -251,7 +252,7 @@ class Image:
             )
         return array_cast(storage, self.pa_type)
 
-    def embed_storage(self, storage: pa.StructArray) -> pa.StructArray:
+    def embed_storage(self, storage: pa.StructArray, token_per_repo_id=None) -> pa.StructArray:
         """Embed image files into the Arrow array.
 
         Args:
@@ -262,12 +263,20 @@ class Image:
             `pa.StructArray`: Array in the Image arrow storage type, that is
                 `pa.struct({"bytes": pa.binary(), "path": pa.string()})`.
         """
+        if token_per_repo_id is None:
+            token_per_repo_id = {}
 
         @no_op_if_value_is_null
         def path_to_bytes(path):
-            with xopen(path, "rb") as f:
-                bytes_ = f.read()
-            return bytes_
+            source_url = path.split("::")[-1]
+            pattern = (
+                config.HUB_DATASETS_URL if source_url.startswith(config.HF_ENDPOINT) else config.HUB_DATASETS_HFFS_URL
+            )
+            source_url_fields = string_to_dict(source_url, pattern)
+            token = token_per_repo_id.get(source_url_fields["repo_id"]) if source_url_fields is not None else None
+            download_config = DownloadConfig(token=token)
+            with xopen(path, "rb", download_config=download_config) as f:
+                return f.read()
 
         bytes_array = pa.array(
             [
@@ -284,7 +293,7 @@ class Image:
         return array_cast(storage, self.pa_type)
 
 
-def list_image_compression_formats() -> List[str]:
+def list_image_compression_formats() -> list[str]:
     if config.PIL_AVAILABLE:
         import PIL.Image
     else:
@@ -359,8 +368,8 @@ def encode_np_array(array: np.ndarray) -> dict:
 
 
 def objects_to_list_of_image_dicts(
-    objs: Union[List[str], List[dict], List[np.ndarray], List["PIL.Image.Image"]],
-) -> List[dict]:
+    objs: Union[list[str], list[dict], list[np.ndarray], list["PIL.Image.Image"]],
+) -> list[dict]:
     """Encode a list of objects into a format suitable for creating an extension array of type `ImageExtensionType`."""
     if config.PIL_AVAILABLE:
         import PIL.Image
